@@ -1,15 +1,13 @@
-import html
-import json
-import threading
-import re
-from html.parser import HTMLParser
-from pathlib import Path
-from typing import Optional
+# window.py (Windows-like + 3 modes: normal / compact / masked)
+from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Slot, QMetaObject, Q_ARG, QSize
-from PySide6.QtGui import QTextCursor, QTextCharFormat, QColor, QPalette, QGuiApplication, QPixmap, QPainter, QIcon
+import html
+import re
+from typing import Optional, Tuple, List, Callable
+
+from PySide6.QtCore import Qt, QTimer, Slot, QSize
+from PySide6.QtGui import QTextCursor, QTextCharFormat, QAction
 from PySide6.QtWidgets import (
-    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -18,643 +16,491 @@ from PySide6.QtWidgets import (
     QPushButton,
     QComboBox,
     QSlider,
-    QStyle,
-    QMessageBox,
     QSizePolicy,
+    QStyle,
+    QMenu,
 )
 
 from ..core.state import STATE
+from ..core.tts_engine import tts_pause, tts_resume, set_voice_by_index
+from ..services.fonctions import restart_current_sentence
 from .prefs import load_window_prefs, save_window_prefs
-from ..playback.control import restart_current_sentence, stop_playback
-from ..services.clipboard import set_clipboard_text
-from ..services.translator import translate_to_fr
-from ..core.tts_engine import (
-    tts_stop,
-    tts_pause,
-    tts_resume,
-    set_voice_by_index,
-    get_speed_multiplier,
-)
-
-_VOICE_PREFS_APPLIED = False
-_HTML_WINDOW = None
-
-
-class DragHandleLabel(QLabel):
-    """Petite poignee permettant de deplacer la fenetre via drag."""
-
-    def __init__(self, window: QWidget, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._win = window
-        self._drag_offset = None
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._win is not None:
-            try:
-                self._drag_offset = event.globalPosition().toPoint() - self._win.frameGeometry().topLeft()
-            except Exception:
-                self._drag_offset = None
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_offset is not None and event.buttons() & Qt.LeftButton and self._win is not None:
-            try:
-                self._win.move(event.globalPosition().toPoint() - self._drag_offset)
-            except Exception:
-                pass
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_offset = None
-        super().mouseReleaseEvent(event)
 
 
 class ControlWindow(QWidget):
-    def __init__(self, text_len: int, highlight_callback, cleanup_callback=None):
+    """
+    UI Windows-like (Qt natif) + 3 modes d'affichage:
+
+    Normal : _set_mode_normal()
+      - Fenêtre actuelle (barre options + texte + status)
+      - Boutons de droite: "<" => masked, "/\" => compact
+
+    Compact : _set_mode_compact()
+      - Seulement la barre d'options (sans zone texte) + boutons de droite
+      - Boutons de droite: "<" => masked, "\/" => normal
+
+    Masked : _set_mode_masked()
+      - Seulement la barre d'options MAIS réduite: Pause + Phrases + 2 boutons de droite
+      - Boutons de droite: ">" => compact, "\/" => normal
+
+    Paramètres vitesse conformes au zip:
+      - slider 0..20
+      - 10 => 1.0
+      - STATE.speed_value mis à jour + restart_current_sentence(debounce_ms=200)
+    """
+
+    MODE_NORMAL = "normal"
+    MODE_COMPACT = "compact"
+    MODE_MASKED = "masked"
+
+    def __init__(
+        self,
+        text_len: int,
+        highlight_callback: Callable[[int], None],
+        cleanup_callback: Optional[Callable[[], None]] = None,
+    ):
         super().__init__()
-        self.setWindowTitle("CodexTTS")
-        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        self.setWindowTitle("SpeakToFR")
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Window)
+
         self._highlight_callback = highlight_callback
         self._cleanup_callback = cleanup_callback
-        self._pos_from_prefs = False
-        self._last_saved_pos = None
 
-        self._main_layout = QVBoxLayout(self)
-        self._main_layout.setContentsMargins(12, 2, 12, 4)
-        self._main_layout.setSpacing(2)
+        self._mode: str = self.MODE_NORMAL
 
-        # Barre boutons
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(1)
+        # Support surbrillance (si utilisé par ui_main)
+        self._last_highlight: Optional[Tuple[int, int]] = None
+        self._highlight_timer = QTimer(self)
+        self._highlight_timer.setSingleShot(True)
+        self._highlight_timer.timeout.connect(self._apply_highlight_from_timer)
+
+        # ---- Layout principal
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
         style = self.style()
+        icon_size = QSize(16, 16)
+        sq_size = QSize(28, 28)
+
         self.pause_icon = style.standardIcon(QStyle.SP_MediaPause)
         self.play_icon = style.standardIcon(QStyle.SP_MediaPlay)
-        self.stop_icon = style.standardIcon(QStyle.SP_BrowserStop)
-        self.open_icon = style.standardIcon(QStyle.SP_ArrowUp)
-        self.close_icon = style.standardIcon(QStyle.SP_ArrowDown)
-        self.up_icon = style.standardIcon(QStyle.SP_ArrowUp)
-        self.down_icon = style.standardIcon(QStyle.SP_ArrowDown)
-        # Toggle vertical (agrandir/reduire)
-        # Icônes uniformes (même famille que navigation)
-        # Icônes uniformes (même famille que navigation)
-        self.collapse_icon = style.standardIcon(QStyle.SP_ArrowUp)     # /\ reduire
-        self.expand_icon = style.standardIcon(QStyle.SP_ArrowDown)     # \/ agrandir
-        # Toggle horizontal (allonger/raccourcir options)
-        self.option_expand_icon = style.standardIcon(QStyle.SP_ArrowForward)   # >
-        self.option_collapse_icon = style.standardIcon(QStyle.SP_ArrowBack)    # <
 
-        # Poignee visuelle (points) en debut de ligne
-        handle_pix = QPixmap(12, 28)
-        handle_pix.fill(Qt.transparent)
-        painter = QPainter(handle_pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor("#7a7a7a"))
-        painter.setPen(Qt.NoPen)
-        spacing_x = 4
-        spacing_y = 2
-        for row in range(5):
-            y = spacing_y + row * (4 + spacing_y)
-            for col in range(3):
-                x = 1 + col * spacing_x
-                painter.drawEllipse(x, y, 4, 4)
-        painter.end()
+        # ---- Barre options (QWidget + HBox) => rendu Windows natif
+        self.toolbar = QWidget(self)
+        bar = QHBoxLayout(self.toolbar)
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(8)
 
-        handle_label = DragHandleLabel(self, self)
-        handle_label.setPixmap(handle_pix)
-        handle_label.setFixedSize(QSize(28, 28))
-        handle_label.setAlignment(Qt.AlignCenter)
-        handle_label.setCursor(Qt.OpenHandCursor)
-        btn_row.addWidget(handle_label)
-
-        self.btn_pause = QPushButton("Pause", self)
+        # Pause
+        self.btn_pause = QPushButton("Pause", self.toolbar)
         self.btn_pause.setIcon(self.pause_icon)
+        self.btn_pause.setIconSize(icon_size)
+        self.btn_pause.clicked.connect(self.on_pause_clicked)
+        bar.addWidget(self.btn_pause)
 
-        self.btn_stop = QPushButton("Fermer", self)
-        self.btn_stop.setIcon(self.stop_icon)
+        # Voix
+        bar.addSpacing(4)
+        self.lbl_voice = QLabel("Voix", self.toolbar)
+        bar.addWidget(self.lbl_voice)
 
-        btn_row.addWidget(self.btn_pause)
-        btn_row.addWidget(self.btn_stop)
-        # Ligne reglage directement dans la barre boutons
-        self.voice_combo = QComboBox(self)
-        self.voice_combo.setMinimumWidth(260)
-        btn_row.addWidget(self.voice_combo)
+        self.voice_combo = QComboBox(self.toolbar)
+        self.voice_combo.setMinimumWidth(180)
+        self.voice_combo.currentTextChanged.connect(self.on_voice_changed)
+        bar.addWidget(self.voice_combo)
 
-        self.speed_box = QWidget(self)
-        self.speed_box.setObjectName("speed_box")
-        speed_layout = QHBoxLayout(self.speed_box)
-        speed_layout.setContentsMargins(8, 4, 8, 4)
-        speed_layout.setSpacing(4)
+        # Spacer gauche -> centre
+        self._sp_left = QWidget(self.toolbar)
+        self._sp_left.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bar.addWidget(self._sp_left)
+
+        # Vitesse au milieu
+        self.speed_box = QWidget(self.toolbar)
+        speed_lay = QHBoxLayout(self.speed_box)
+        speed_lay.setContentsMargins(8, 2, 8, 2)
+        speed_lay.setSpacing(6)
 
         self.speed_label = QLabel("Vitesse 1.0", self.speed_box)
-        speed_layout.addWidget(self.speed_label)
+        speed_lay.addWidget(self.speed_label)
 
         self.speed_slider = QSlider(Qt.Horizontal, self.speed_box)
-        self.speed_slider.setRange(0, 20)  # 0.0 -> 2.0
+        self.speed_slider.setRange(0, 20)   # 0.0 -> 2.0
         self.speed_slider.setSingleStep(1)
-        self.speed_slider.setValue(10)
-        self.speed_slider.setMinimumWidth(200)
-        speed_layout.addWidget(self.speed_slider, 1)
-
-        btn_row.addWidget(self.speed_box, 1)
-
-        btn_row.addStretch(1)
-        # Navigation phrases (unique ligne)
-        icon_skip_back = style.standardIcon(QStyle.SP_MediaSkipBackward)
-        icon_skip_fwd = style.standardIcon(QStyle.SP_MediaSkipForward)
-        icon_seek_back = style.standardIcon(QStyle.SP_MediaSeekBackward)
-        icon_seek_fwd = style.standardIcon(QStyle.SP_MediaSeekForward)
-        nav_icon_size = QSize(16, 16)
-        nav_btn_size = QSize(28, 28)
-
-        self.nav_container = QWidget(self)
-        self.nav_container.setObjectName("nav_container")
-        nav_layout = QHBoxLayout(self.nav_container)
-        nav_layout.setContentsMargins(6, 2, 6, 2)
-        nav_layout.setSpacing(1)
-
-        self.btn_first = QPushButton(self)
-        self.btn_first.setIcon(icon_skip_back)
-        self.btn_first.setIconSize(nav_icon_size)
-        self.btn_first.setToolTip("Premiere phrase")
-        self.btn_first.setFixedSize(nav_btn_size)
-        nav_layout.addWidget(self.btn_first)
-
-        self.btn_prev = QPushButton(self)
-        self.btn_prev.setIcon(icon_seek_back)
-        self.btn_prev.setIconSize(nav_icon_size)
-        self.btn_prev.setToolTip("Phrase precedente")
-        self.btn_prev.setFixedSize(nav_btn_size)
-        nav_layout.addWidget(self.btn_prev)
-
-        self.btn_next = QPushButton(self)
-        self.btn_next.setIcon(icon_seek_fwd)
-        self.btn_next.setIconSize(nav_icon_size)
-        self.btn_next.setToolTip("Phrase suivante")
-        self.btn_next.setFixedSize(nav_btn_size)
-        nav_layout.addWidget(self.btn_next)
-
-        self.btn_last = QPushButton(self)
-        self.btn_last.setIcon(icon_skip_fwd)
-        self.btn_last.setIconSize(nav_icon_size)
-        self.btn_last.setToolTip("Derniere phrase")
-        self.btn_last.setFixedSize(nav_btn_size)
-        nav_layout.addWidget(self.btn_last)
-        nav_layout.addStretch(1)
-
-        btn_row.addWidget(self.nav_container)
-
-        self.btn_close_ui = QPushButton(self)
-        self.btn_close_ui = QPushButton(self)
-        self.btn_close_ui.setIcon(self.collapse_icon)
-        self.btn_close_ui.setIconSize(nav_icon_size)
-        self.btn_close_ui.setFixedSize(nav_btn_size)
-        self.btn_close_ui.setToolTip("Reduire/afficher")
-        btn_row.addWidget(self.btn_close_ui)
-
-        self.btn_expand_options = QPushButton(self)
-        self.btn_expand_options.setIcon(self.option_expand_icon)
-        self.btn_expand_options.setIconSize(nav_icon_size)
-        self.btn_expand_options.setFixedSize(nav_btn_size)
-        self.btn_expand_options.setToolTip("Allonger/raccourcir les options")
-        self.btn_expand_options.setVisible(False)
-        btn_row.addWidget(self.btn_expand_options)
-
-        # Navigation phrases (ligne unique en fin de barre)
-        self.top_bar = QWidget(self)
-        self.top_bar.setLayout(btn_row)
-        self._main_layout.addWidget(self.top_bar)
-        # Style du cadre vitesse
-        self.setStyleSheet(
-            """
-            QWidget#speed_box {
-                border: 1px solid #d0d0d0;
-                border-radius: 6px;
-                background: #f8f8f8;
-            }
-            QWidget#nav_container {
-                border: 1px solid #d0d0d0;
-                border-radius: 6px;
-                background: #f8f8f8;
-            }
-            """
-        )
-
-        # Ligne navigation phrases
-
-        # Zone texte
-        self.text_edit = QTextEdit(self)
-        # Panneau "Code" pour afficher le contenu réel des <pre> (visuel uniquement)
-        self.pre_view = QTextEdit()
-        self.pre_view.setReadOnly(True)
-        self.pre_view.setVisible(False)
-        self.pre_view.setStyleSheet(
-            "QTextEdit { background: #000000; color: #ffffff; font-family: Consolas, monospace; }"
-        )
-
-        self.text_edit.setReadOnly(True)
-        self.text_edit.setAcceptRichText(True)
-        self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self._main_layout.addWidget(self.text_edit)
-        self._main_layout.addWidget(self.pre_view)
-
-
-        self.info_widget = QWidget(self)
-        info_row = QHBoxLayout(self.info_widget)
-        info_row.setContentsMargins(0, 0, 0, 0)
-        info_row.addStretch(1)
-        self.info_label = QLabel(f"Lecture ({text_len} caracteres)", self)
-        info_row.addWidget(self.info_label)
-        self.info_widget.setLayout(info_row)
-        self._main_layout.addWidget(self.info_widget)
-
-        # Handlers
-        self.btn_pause.clicked.connect(self.on_pause_clicked)
-        self.btn_stop.clicked.connect(self.on_stop_clicked)
-        self.voice_combo.currentTextChanged.connect(self.on_voice_changed)
+        self.speed_slider.setValue(10)     # 1.0
+        self.speed_slider.setMinimumWidth(220)
         self.speed_slider.valueChanged.connect(self.on_speed_changed)
+        speed_lay.addWidget(self.speed_slider, 1)
+
+        bar.addWidget(self.speed_box)
+
+        # Spacer centre -> droite
+        self._sp_right = QWidget(self.toolbar)
+        self._sp_right.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bar.addWidget(self._sp_right)
+
+        # Groupe phrases (4 boutons, style Windows)
+        self.nav_container = QWidget(self.toolbar)
+        nav = QHBoxLayout(self.nav_container)
+        nav.setContentsMargins(6, 2, 6, 2)
+        nav.setSpacing(1)
+
+        def sq_btn(icon, tip):
+            b = QPushButton(self.toolbar)
+            b.setIcon(icon)
+            b.setIconSize(icon_size)
+            b.setToolTip(tip)
+            b.setFixedSize(sq_size)
+            return b
+
+        self.btn_first = sq_btn(style.standardIcon(QStyle.SP_MediaSkipBackward), "Première phrase")
+        self.btn_prev  = sq_btn(style.standardIcon(QStyle.SP_MediaSeekBackward), "Phrase précédente")
+        self.btn_next  = sq_btn(style.standardIcon(QStyle.SP_MediaSeekForward), "Phrase suivante")
+        self.btn_last  = sq_btn(style.standardIcon(QStyle.SP_MediaSkipForward), "Dernière phrase")
+
+        nav.addWidget(self.btn_first)
+        nav.addWidget(self.btn_prev)
+        nav.addWidget(self.btn_next)
+        nav.addWidget(self.btn_last)
+
+        bar.addWidget(self.nav_container)
+
+        # ---- Boutons de mode (tout à droite, même style que le groupe)
+        self.mode_container = QWidget(self.toolbar)
+        mode_lay = QHBoxLayout(self.mode_container)
+        mode_lay.setContentsMargins(6, 2, 6, 2)
+        mode_lay.setSpacing(1)
+
+        self.btn_mode1 = QPushButton(self.toolbar)  # "<" ou ">"
+        self.btn_mode1.setFixedSize(sq_size)
+        self.btn_mode1.setToolTip("Masqué / Compact")
+
+        self.btn_mode2 = QPushButton(self.toolbar)  # "/\" ou "\/"
+        self.btn_mode2.setFixedSize(sq_size)
+        self.btn_mode2.setToolTip("Compact / Normal")
+
+        mode_lay.addWidget(self.btn_mode1)
+        mode_lay.addWidget(self.btn_mode2)
+        bar.addWidget(self.mode_container)
+
+        # Menu attaché au mode2 (optionnel, mais demandé précédemment)
+        self._menu = QMenu(self)
+        act_prefs = QAction("Préférences…", self)
+        act_about = QAction("À propos…", self)
+        act_quit = QAction("Quitter", self)
+        act_prefs.triggered.connect(self._show_prefs_placeholder)
+        act_about.triggered.connect(self._show_about_placeholder)
+        act_quit.triggered.connect(self.close)
+        self._menu.addAction(act_prefs)
+        self._menu.addAction(act_about)
+        self._menu.addSeparator()
+        self._menu.addAction(act_quit)
+        # click-droit sur bouton2 ouvre menu (sans changer comportement principal)
+        self.btn_mode2.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.btn_mode2.customContextMenuRequested.connect(lambda pos: self._menu.exec(self.btn_mode2.mapToGlobal(pos)))
+
+        # Connexions nav
         self.btn_first.clicked.connect(lambda: self._jump_to_sentence(0))
         self.btn_prev.clicked.connect(lambda: self._jump_to_sentence(STATE.sentence_index - 1))
         self.btn_next.clicked.connect(lambda: self._jump_to_sentence(STATE.sentence_index + 1))
-        self.btn_last.clicked.connect(lambda: self._jump_to_sentence(len(STATE.sentence_parts) - 1))
-        self.btn_close_ui.clicked.connect(self._toggle_collapse)
-        self.btn_expand_options.clicked.connect(self._toggle_options)
+        self.btn_last.clicked.connect(lambda: self._jump_to_sentence(len(STATE.sentence_parts) - 1 if STATE.sentence_parts else 0))
 
-        # Position sauvegardee
+        # Connexions modes
+        self.btn_mode1.clicked.connect(self._on_mode1_clicked)
+        self.btn_mode2.clicked.connect(self._on_mode2_clicked)
+
+        root.addWidget(self.toolbar)
+
+        # Texte principal
+        self.text_edit = QTextEdit(self)
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setAcceptRichText(True)
+        self.text_edit.setMinimumHeight(220)
+        root.addWidget(self.text_edit, 1)
+
+        # Panneau <pre> (optionnel)
+        self.pre_view = QTextEdit(self)
+        self.pre_view.setReadOnly(True)
+        self.pre_view.setAcceptRichText(False)
+        self.pre_view.setVisible(False)
+        self.pre_view.setMinimumHeight(120)
+        root.addWidget(self.pre_view)
+
+        # Ligne d'état en bas (sans cadre), alignée à droite
+        self.status_label = QLabel("", self)
+        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.status_label.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(self.status_label)
+
+        # Appliquer prefs (position/vitesse)
         self._apply_saved_position()
-        # Etat agrandi/reduit sauvegarde
-        self._collapsed = False
-        self._apply_saved_collapsed()
-        # Etat options (allonge/raccourci)
-        self._apply_saved_options()
 
-    @Slot(int)
-    def apply_highlight_slot(self, index: int):
-        if self._highlight_callback:
-            self._highlight_callback(index)
+        # Init mode normal (boutons corrects)
+        self._set_mode_normal()
 
+        # Affiche le statut demandé
+        self.set_info(f"Lecture ({int(text_len)} caracteres)")
+
+    # ---- Menu placeholders
+    def _show_prefs_placeholder(self):
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "SpeakToFR", "Préférences… (à implémenter)")
+
+    def _show_about_placeholder(self):
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "SpeakToFR", "SpeakToFR\nUI: PySide6 (style Windows)")
+
+    # ---- Mode logic
+    def _on_mode1_clicked(self):
+        # Normal/Compact: "<" => masked ; Masked: ">" => compact
+        if self._mode in (self.MODE_NORMAL, self.MODE_COMPACT):
+            self._set_mode_masked()
+        else:
+            self._set_mode_compact()
+
+    def _on_mode2_clicked(self):
+        # Normal: "/\" => compact
+        # Compact: "\/" => normal
+        # Masked: "\/" => normal
+        if self._mode == self.MODE_NORMAL:
+            self._set_mode_compact()
+        else:
+            self._set_mode_normal()
+
+    def _set_mode_normal(self):
+        self._mode = self.MODE_NORMAL
+
+        # Boutons de droite
+        self.btn_mode1.setText("<")
+        self.btn_mode2.setText("/\\")   # /\
+
+        # Affichage: tout
+        self._set_bar_reduced(False)
+        self.text_edit.setVisible(True)
+        self.status_label.setVisible(True)
+        # pre_view seulement si contenu
+        # (on laisse son état courant)
+
+    def _set_mode_compact(self):
+        self._mode = self.MODE_COMPACT
+
+        self.btn_mode1.setText("<")
+        self.btn_mode2.setText("\\/")   # \/
+
+        # Affichage: barre complète, pas de texte ni status
+        self._set_bar_reduced(False)
+        self.text_edit.setVisible(False)
+        self.pre_view.setVisible(False)
+        self.status_label.setVisible(False)
+
+    def _set_mode_masked(self):
+        self._mode = self.MODE_MASKED
+
+        self.btn_mode1.setText(">")
+        self.btn_mode2.setText("\\/")   # \/
+
+        # Affichage: barre réduite (Pause + Phrases + modes), pas de texte/status
+        self._set_bar_reduced(True)
+        self.text_edit.setVisible(False)
+        self.pre_view.setVisible(False)
+        self.status_label.setVisible(False)
+
+    def _set_bar_reduced(self, reduced: bool):
+        """Réduit la barre aux éléments demandés en mode masked."""
+        self.lbl_voice.setVisible(not reduced)
+        self.voice_combo.setVisible(not reduced)
+        self.speed_box.setVisible(not reduced)
+        self._sp_left.setVisible(not reduced)
+        self._sp_right.setVisible(not reduced)
+
+    # ---- Controls
+    @Slot()
     def on_pause_clicked(self):
         try:
-            if not STATE.paused:
+            if not getattr(STATE, "paused", False):
                 self.btn_pause.setText("Reprendre")
                 self.btn_pause.setIcon(self.play_icon)
                 tts_pause()
+                STATE.paused = True
             else:
                 self.btn_pause.setText("Pause")
                 self.btn_pause.setIcon(self.pause_icon)
                 tts_resume()
+                STATE.paused = False
         except Exception as e:
-            print(f"[CodexTTS] Pause/Resume error: {e}")
-
-    def on_stop_clicked(self):
-        threading.Thread(target=stop_playback, daemon=True).start()
-        if self._cleanup_callback:
-            try:
-                self._cleanup_callback(clear_clipboard=True)
-            except Exception:
-                pass
+            print(f"[SpeakToFR] Pause/Resume error: {e}")
 
     def on_voice_changed(self, text: str):
         try:
-            for i, v in enumerate(STATE.voices):
-                if v["desc"] == text:
+            for i, v in enumerate(getattr(STATE, "voices", []) or []):
+                if v.get("desc") == text:
                     set_voice_by_index(i)
                     restart_current_sentence(stop_existing=True, adjust_layout=False)
-                    save_window_prefs({"voice": text})
-                    break
+                    try:
+                        save_window_prefs({"voice_desc": text})
+                    except Exception:
+                        pass
+                    return
         except Exception:
             pass
 
     def on_speed_changed(self, value: int):
         val = float(value) / 10.0
-        STATE.speed_value = val
+        try:
+            STATE.speed_value = val
+        except Exception:
+            pass
         self.speed_label.setText(f"Vitesse {val:.1f}")
         restart_current_sentence(debounce_ms=200, stop_existing=True, adjust_layout=False)
-        save_window_prefs({"speed": val})
-
-    def schedule_adjust(self):
-        QTimer.singleShot(0, self._adjust_height_to_text)
-
-    def _adjust_height_to_text(self):
-        """Hauteur auto : fenetre clamp 90% ecran, QTextEdit = min(texte, espace dispo)."""
-        screen = QGuiApplication.primaryScreen()
-        max_h = int(screen.availableGeometry().height()) if screen else 1000
-        max_win_h = int(max_h * 0.9)
-
-        # Hauteur du texte rendu
-        doc = self.text_edit.document()
-        layout = doc.documentLayout()
-        doc_h = layout.documentSize().height() if layout else doc.size().height()
-        if doc_h <= 0:
-            doc_h = 80
-
-        m = self.text_edit.contentsMargins()
-        frame = self.text_edit.frameWidth() * 2
-        text_needed_h = int(doc_h + m.top() + m.bottom() + frame)
-
-        # Hauteur fixe des barres + marges layout
-        lm, tm, rm, bm = self._main_layout.getContentsMargins()
-        spacing = self._main_layout.spacing()
-        top_h = self.top_bar.sizeHint().height()
-        info_h = self.info_widget.sizeHint().height()
-        fixed_parts_h = top_h + info_h + tm + bm + spacing * 2
-
-        if getattr(self, "_collapsed", False):
-            # Mode compact : seulement la barre du haut
-            final_win_h = min(max_win_h, top_h + tm + bm)
-            # Supprime marges/espacements pour serrer la barre
-            self._main_layout.setContentsMargins(4, 2, 4, 2)
-            self._main_layout.setSpacing(0)
-            self.top_bar.layout().setContentsMargins(0, 0, 0, 0)
-            self.top_bar.layout().setSpacing(0)
-        else:
-            # Restaure marges par defaut en mode normal
-            self._main_layout.setContentsMargins(12, 2, 12, 4)
-            self._main_layout.setSpacing(2)
-            self.top_bar.layout().setContentsMargins(0, 0, 0, 0)
-            self.top_bar.layout().setSpacing(1)
-
-            ideal_win_h = fixed_parts_h + text_needed_h
-            final_win_h = min(ideal_win_h, max_win_h)
-
-            avail_text_h = max(0, final_win_h - fixed_parts_h)
-            text_final_h = min(text_needed_h, avail_text_h if avail_text_h > 0 else text_needed_h)
-
-            self.text_edit.setMinimumHeight(text_final_h)
-            self.text_edit.setMaximumHeight(avail_text_h if avail_text_h > 0 else text_final_h)
-        self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        self.setMaximumHeight(max_h)
-        # Centre/replace la fenetre uniquement si aucune position sauvegardee
-        target_w = self.width() or self.sizeHint().width()
-        if getattr(self, "_collapsed", False):
-            target_w = self.top_bar.sizeHint().width() + 20
-        self.resize(target_w, final_win_h)
         try:
-            if self._pos_from_prefs and self._last_saved_pos:
-                self.move(*self._last_saved_pos)
-            else:
-                screen_geom = screen.availableGeometry()
-                x = screen_geom.x() + (screen_geom.width() - target_w) // 2
-                if getattr(self, "_collapsed", False):
-                    y = screen_geom.y()
-                else:
-                    y = screen_geom.y() + (screen_geom.height() - final_win_h) // 2
-                self.move(x, y)
+            save_window_prefs({"speed": val})
         except Exception:
             pass
 
-    def _toggle_collapse(self):
-        self._set_collapsed(not getattr(self, "_collapsed", False))
-
-    def _set_collapsed(self, value: bool):
-        self._collapsed = bool(value)
-        collapsed = self._collapsed
-
-        # Icon toggle
-        self.btn_close_ui.setIcon(self.expand_icon if collapsed else self.collapse_icon)
-
-        # Elements a masquer (on garde pause/fermer/boutons toggle visibles)
-        for w in (
-            self.voice_combo,
-            self.speed_box,
-            self.nav_container,
-            self.text_edit,
-            self.info_widget,
-        ):
-            if w is None:
-                continue
-            w.setVisible(not collapsed)
-
-        # Le bouton d'options reste visible dans les deux modes
-        self.btn_expand_options.setVisible(collapsed)
-        # Icône du bouton d'options : > quand options cachees (etat initial)
-        self.btn_expand_options.setIcon(self.option_expand_icon if not self.voice_combo.isVisible() else self.option_collapse_icon)
-
-        # Ajuste immédiatement les marges/espacements pour éviter les décalages à la réouverture
-        if collapsed:
-            self._main_layout.setContentsMargins(4, 2, 4, 2)
-            self._main_layout.setSpacing(0)
-            self.top_bar.layout().setContentsMargins(0, 0, 0, 0)
-            self.top_bar.layout().setSpacing(0)
-        else:
-            self._main_layout.setContentsMargins(12, 2, 12, 4)
-            self._main_layout.setSpacing(2)
-            self.top_bar.layout().setContentsMargins(0, 0, 0, 0)
-            self.top_bar.layout().setSpacing(1)
-
-        # Sauvegarde etat
-        try:
-            save_window_prefs({"collapsed": collapsed})
-        except Exception:
-            pass
-
-        self.schedule_adjust()
-
-    def _toggle_options(self):
-        # Inverser la visibilite des options uniquement, sans toucher au mode collapse
-        self._set_options_visible(not self.voice_combo.isVisible(), persist=True)
-
-    def _set_options_visible(self, visible: bool, persist: bool = False):
-        for w in (self.voice_combo, self.speed_box, self.nav_container):
-            w.setVisible(visible)
-        self.btn_expand_options.setIcon(self.option_collapse_icon if visible else self.option_expand_icon)
-        if persist:
-            try:
-                save_window_prefs({"options_visible": visible})
-            except Exception:
-                pass
-        if getattr(self, "_collapsed", False):
-            self._adjust_height_to_text()
-        self.schedule_adjust()
-
+    # ---- Navigation / Jump (zip-like + skip <pre>)
     def _jump_to_sentence(self, idx: int):
-        if not STATE.sentence_parts:
+        if not getattr(STATE, "sentence_parts", None):
             return
         max_idx = len(STATE.sentence_parts) - 1
-        idx = max(0, min(idx, max_idx))
+        idx = max(0, min(int(idx), max_idx))
 
-        # Saute les phrases marquees <pre> dans les deux sens.
         skip_flags = getattr(STATE, "sentence_skip", None) or []
         if skip_flags and 0 <= idx <= max_idx and idx < len(skip_flags):
             if skip_flags[idx]:
-                if idx <= STATE.sentence_index:
-                    # Remonter
+                if idx <= int(getattr(STATE, "sentence_index", 0)):
                     while idx > 0 and idx < len(skip_flags) and skip_flags[idx]:
                         idx -= 1
                 else:
-                    # Descendre
                     while idx < max_idx and idx < len(skip_flags) and skip_flags[idx]:
                         idx += 1
 
         STATE.sentence_index = idx
         restart_current_sentence(stop_existing=True, adjust_layout=False)
 
+    # ---- API attendue par ui_main
     def set_voice_items(self, values: list[str], current: str):
+        self.voice_combo.blockSignals(True)
         self.voice_combo.clear()
         self.voice_combo.addItems(values)
         try:
-            longest = max(values, key=len) if values else ""
-            metrics = self.voice_combo.fontMetrics()
-            pad = 40
-            width_px = metrics.horizontalAdvance(longest) + pad
-            self.voice_combo.setMinimumWidth(width_px)
-            self.voice_combo.setMaximumWidth(width_px)
+            if current in values:
+                self.voice_combo.setCurrentText(current)
         except Exception:
             pass
-        self.voice_combo.setCurrentText(current)
+        self.voice_combo.blockSignals(False)
 
     def set_info(self, text: str):
-        self.info_label.setText(text)
+        # demandé: en bas, à droite, sans cadre
+        self.status_label.setText(text or "")
 
     def set_content(self, text: str, html: Optional[str] = None, original_html: Optional[str] = None):
         if html and html.strip():
             h = html.strip()
-            # IMPORTANT: si le HTML contient déjà <html>, on NE re-wrappe PAS
             if "<html" in h.lower():
                 self.text_edit.setHtml(h)
             else:
                 self.text_edit.setHtml(f"<html><body>{h}</body></html>")
         else:
-            self.text_edit.setPlainText(text)
+            self.text_edit.setPlainText(text or "")
 
-        # Affichage des blocs <pre> dans un panneau séparé (visuel uniquement)
+        # Panneau <pre>
         try:
             if original_html:
                 blocks = re.findall(r"<pre[^>]*>(.*?)</pre>", original_html, flags=re.IGNORECASE | re.DOTALL)
                 if blocks:
                     cleaned = []
                     for b in blocks:
-                        b_txt = re.sub(r"<[^>]+>", "", b)   # retire tags internes si besoin
+                        b_txt = re.sub(r"<[^>]+>", "", b)
                         b_txt = html.unescape(b_txt)
                         cleaned.append(b_txt.strip("\n"))
-
                     sep = "\n\n" + ("-" * 40) + "\n\n"
-                    self.pre_view.setPlainText(sep.join(cleaned) + "\n")
-                    self.pre_view.setVisible(True)
+                    self.pre_view.setPlainText(sep.join(cleaned))
+                    # visible seulement en mode normal
+                    self.pre_view.setVisible(self._mode == self.MODE_NORMAL)
                 else:
-                    self.pre_view.clear()
                     self.pre_view.setVisible(False)
             else:
-                self.pre_view.clear()
                 self.pre_view.setVisible(False)
         except Exception:
-            self.pre_view.clear()
             self.pre_view.setVisible(False)
 
-        self.schedule_adjust()
+    def schedule_highlight(self, start: int, length: int, delay_ms: int = 0):
+        self._last_highlight = (int(start), int(length))
+        self._highlight_timer.start(max(0, int(delay_ms)))
 
-    def apply_highlight(self, start: int, end: int):
-        """Surligne la phrase en cours sans la sélectionner. Les blocs <pre> ne sont pas surlignés."""
-        if getattr(self, "_highlight_allowed", True) is False:
+    @Slot()
+    def _apply_highlight_from_timer(self):
+        if self._last_highlight is None:
             return
-        extra_selections = []
-        if start < end:
-            # Convertit les index "référence" -> index du texte réellement rendu par Qt
-            try:
-                mp = getattr(STATE, "ref_to_doc_map", None)
-                if isinstance(mp, list) and end < len(mp):
-                    start_m = mp[start] if 0 <= start < len(mp) else start
-                    end_m = mp[end] if 0 <= end < len(mp) else end
-                    if start_m is not None and end_m is not None:
-                        start, end = int(start_m), int(end_m)
-            except Exception:
-                pass
+        start, length = self._last_highlight
+        self.apply_highlight(start, length)
 
-            # Clamp sur le texte réellement affiché
-            doc_display = self.text_edit.document().toPlainText()
-            doc_len = len(doc_display)
-            start = max(0, min(start, doc_len))
-            end = max(start, min(end, doc_len))
-
-            excludes = getattr(self, "_pre_exclude_ranges", []) or []
-
-            def subtract_ranges(seg_start: int, seg_end: int, ranges):
-                parts = [(seg_start, seg_end)]
-                for a, b in ranges:
-                    new_parts = []
-                    for x, y in parts:
-                        if b <= x or a >= y:
-                            new_parts.append((x, y))
-                        else:
-                            if x < a:
-                                new_parts.append((x, a))
-                            if b < y:
-                                new_parts.append((b, y))
-                    parts = new_parts
-                return [(x, y) for x, y in parts if x < y]
-
-            segments = subtract_ranges(start, end, excludes)
-
-            utf16_map = getattr(STATE, "doc_utf16_map", None)
-
-            for s, e in segments:
-                if isinstance(utf16_map, list) and e < len(utf16_map):
-                    s = utf16_map[s] if 0 <= s < len(utf16_map) else s
-                    e = utf16_map[e] if 0 <= e < len(utf16_map) else e
-                selection = QTextEdit.ExtraSelection()
-                selection.format.setBackground(QColor("#fff4b8"))
-                selection.format.setForeground(QColor("#000000"))
-                cursor = self.text_edit.textCursor()
-                cursor.setPosition(s)
-                cursor.setPosition(e, QTextCursor.KeepAnchor)
-                selection.cursor = cursor
-                extra_selections.append(selection)
-
-            # Centre la vue sur le début (hors <pre> si possible)
-            if segments:
-                visible_pos = segments[0][0]
-                if isinstance(utf16_map, list) and visible_pos < len(utf16_map):
-                    visible_pos = utf16_map[visible_pos]
-                visible_cursor = self.text_edit.textCursor()
-                visible_cursor.clearSelection()
-                visible_cursor.setPosition(visible_pos)
-                self.text_edit.setTextCursor(visible_cursor)
-                self.text_edit.ensureCursorVisible()
-
-        self.text_edit.setExtraSelections(extra_selections)
-
-    def clear_highlight(self):
-        self.text_edit.setExtraSelections([])
-
-    def shrink_text_area(self):
-        """Reduit la zone texte."""
-        self.text_edit.setMinimumHeight(120)
-        self._main_layout.invalidate()
-
-    def closeEvent(self, event):
-        threading.Thread(target=stop_playback, daemon=True).start()
-        super().closeEvent(event)
-
-    def moveEvent(self, event):
-        super().moveEvent(event)
+    def apply_highlight(self, start: int, length: int):
+        if start < 0 or length <= 0:
+            return
         try:
-            pos = (self.x(), self.y())
-            self._last_saved_pos = pos
-            save_window_prefs({"x": pos[0], "y": pos[1]})
+            cursor = self.text_edit.textCursor()
+            cursor.setPosition(0)
+            cursor.movePosition(QTextCursor.Right, QTextCursor.MoveAnchor, start)
+            cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, length)
+
+            fmt = QTextCharFormat()
+            fmt.setBackground(self.palette().highlight())
+            fmt.setForeground(self.palette().highlightedText())
+            cursor.mergeCharFormat(fmt)
+
+            self.text_edit.setTextCursor(cursor)
+            self._last_highlight = (start, length)
         except Exception:
             pass
 
+    def clear_highlight(self):
+        try:
+            cursor = self.text_edit.textCursor()
+            cursor.select(QTextCursor.Document)
+            cursor.setCharFormat(QTextCharFormat())
+        except Exception:
+            pass
+        self._last_highlight = None
+
+    def shrink_text_area(self):
+        # compat
+        self.text_edit.setMinimumHeight(160)
+
+    # ---- Prefs / geometry
+    def closeEvent(self, event):
+        try:
+            prefs = load_window_prefs() or {}
+            prefs["x"] = int(self.x())
+            prefs["y"] = int(self.y())
+            prefs["w"] = int(self.width())
+            prefs["h"] = int(self.height())
+            save_window_prefs(prefs)
+        except Exception:
+            pass
+
+        try:
+            if callable(self._cleanup_callback):
+                self._cleanup_callback()
+        except Exception:
+            pass
+
+        super().closeEvent(event)
+
     def _apply_saved_position(self):
-        data = load_window_prefs()
-        if data and "x" in data and "y" in data:
-            self._pos_from_prefs = True
-            self._last_saved_pos = (int(data["x"]), int(data["y"]))
-            try:
-                self.move(*self._last_saved_pos)
-            except Exception:
-                pass
-        else:
-            self._pos_from_prefs = False
+        try:
+            prefs = load_window_prefs() or {}
+            x = prefs.get("x")
+            y = prefs.get("y")
+            w = prefs.get("w")
+            h = prefs.get("h")
+            speed = prefs.get("speed")
+            if isinstance(speed, (int, float)):
+                self.speed_slider.setValue(int(float(speed) * 10))
+                self.speed_label.setText(f"Vitesse {float(speed):.1f}")
 
-    def _apply_saved_collapsed(self):
-        data = load_window_prefs()
-        if data and "collapsed" in data:
-            self._set_collapsed(bool(data["collapsed"]))
-
-    def _apply_saved_options(self):
-        data = load_window_prefs()
-        if data and "options_visible" in data:
-            self._set_options_visible(bool(data["options_visible"]), persist=False)
+            if isinstance(w, int) and isinstance(h, int) and w > 200 and h > 150:
+                self.resize(w, h)
+            if isinstance(x, int) and isinstance(y, int):
+                self.move(x, y)
+        except Exception:
+            pass

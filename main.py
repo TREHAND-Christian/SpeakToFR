@@ -18,6 +18,7 @@ for _d in (_pyside_dir, _pyside_dir / "lib"):
         os.environ["PATH"] = str(_d) + os.pathsep + os.environ.get("PATH", "")
 
 from PySide6.QtWidgets import QApplication
+from qfluentwidgets import setTheme, setThemeColor, Theme
 
 from codex_tts.core.state import STATE
 from codex_tts.services.watcher import clipboard_loop
@@ -30,6 +31,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    setTheme(Theme.LIGHT)
+    setThemeColor("#0067c0")
 
     def shutdown():
         try:
