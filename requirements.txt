@@ -1,0 +1,7 @@
+pywin32
+uiautomation
+langdetect
+googletrans==4.0.0-rc1
+PySide6
+PySide6-Fluent-Widgets
+winsdk
