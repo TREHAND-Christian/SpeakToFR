@@ -1,6 +1,7 @@
 import json
 import difflib
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,7 @@ from ..text.html_utils import (
     _plain_to_html,
     _space_around_inline_code_links,
     _strip_empty_html_tags,
+    _strip_html_comments,
     _mask_code_punct,
     _unmask_code_punct_tts,
     _unmask_code_punct_display,
@@ -40,12 +42,34 @@ from ..text.html_utils import (
     _spell_tts_http,
     _spell_tts_paths,
     _strip_tts_icons,
+    _add_sentence_space_tts,
+    _add_sentence_space_text,
+    _add_sentence_space_with_ranges,
+    _add_sentence_space_html,
+    _trim_space_before_punct,
     _style_pre_blocks,
     _prep_html_for_positions,
     translate_html_preserve_markup,
 )
 
 _VOICE_PREFS_APPLIED = False
+
+_HTML_DEBUG_DIR = Path(__file__).resolve().parents[2] / "html"
+
+
+def _write_html_debug(suffix: str, html_code: Optional[str]) -> None:
+    if html_code is None:
+        return
+    try:
+        prefs = load_window_prefs() or {}
+        if not prefs.get("debug_html", False):
+            return
+        _HTML_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time() * 1000)
+        path = _HTML_DEBUG_DIR / f"{ts}_{suffix}.html"
+        path.write_text(html_code, encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _build_utf16_index_map(text: str) -> list[int]:
@@ -150,12 +174,15 @@ def speak_with_ui(
         except Exception as e:
             print(f"[CodexTTS] speak_with_ui: erreur stop_playback initial {e}")
 
+    text = _strip_html_comments(text)
     # Detecte si on dispose d'HTML et derive une version texte pour le TTS
     html_fragment = text if _looks_like_html(text) else None
     if html_fragment:
+        html_fragment = _strip_html_comments(html_fragment)
         html_fragment = _space_around_inline_code_links(html_fragment)
         html_fragment = _strip_empty_html_tags(html_fragment)
     base_text = _strip_html_to_text(text) if html_fragment else text
+    _write_html_debug("before_translation", html_fragment or _plain_to_html(base_text))
 
     # Si le texte ressemble déjà à du français, ne le retraduis pas
     if translate_text and _looks_like_french(base_text or ""):
@@ -192,6 +219,7 @@ def speak_with_ui(
 
         # Masque les points internes (domaine, email, fichiers) pour ne pas couper les phrases
         display_plain_masked = _mask_inline_dots(display_plain_masked)
+        display_plain_masked, pre_ranges = _add_sentence_space_with_ranges(display_plain_masked, pre_ranges)
 
         # Ranges des <pre> dans le texte affiché (pour ignorer la surbrillance à l'intérieur)
         STATE.pre_ranges = pre_ranges
@@ -199,7 +227,8 @@ def speak_with_ui(
         display_plain_unmasked = _unmask_code_punct_display(display_plain_masked)
 
         # HTML affiché (original), stylé pour <pre>
-        html_for_display = _style_pre_blocks(display_html) if display_html else None
+        html_for_display = _style_pre_blocks(_strip_html_comments(display_html)) if display_html else None
+        _write_html_debug("display_in_app", html_for_display)
 
         # Normalisation newlines
         normalized_masked = display_plain_masked.replace("\r\n", "\n").replace("\r", "\n")
@@ -239,6 +268,7 @@ def speak_with_ui(
                 tts_s = _spell_tts_http(tts_s)
             tts_s = _spell_tts_paths(tts_s)
             tts_s = _strip_tts_icons(tts_s)
+            tts_s = _add_sentence_space_tts(tts_s)
             tts_s = _spell_letters_tts(tts_s)
             STATE.sentence_parts_tts.append(tts_s)
 
@@ -378,6 +408,7 @@ def speak_with_ui(
                         tts_s = _spell_tts_http(tts_s)
                     tts_s = _spell_tts_paths(tts_s)
                     tts_s = _strip_tts_icons(tts_s)
+                    tts_s = _add_sentence_space_tts(tts_s)
                     tts_s = _spell_letters_tts(tts_s)
                     tts_parts.append(tts_s)
             else:
@@ -388,6 +419,7 @@ def speak_with_ui(
                         tts_s = _spell_tts_http(tts_s)
                     tts_s = _spell_tts_paths(tts_s)
                     tts_s = _strip_tts_icons(tts_s)
+                    tts_s = _add_sentence_space_tts(tts_s)
                     tts_s = _spell_letters_tts(tts_s)
                     tts_parts.append(tts_s)
 
@@ -552,12 +584,16 @@ def speak_with_ui(
             if display_html_override is None and html_fragment:
                 # Traduire les text nodes et conserver la structure HTML
                 translated_plain, translated_html = translate_html_preserve_markup(html_fragment)
-                translated = translated_plain
+                translated = _add_sentence_space_text(translated_plain)
+                translated = _trim_space_before_punct(translated)
+                translated_html = _add_sentence_space_html(translated_html)
                 translated_html = _space_around_inline_code_links(translated_html)
                 display_html = _style_pre_blocks(translated_html)
                 allow_highlight = True  # on laisse le highlight actif sur le texte traduit
+                _write_html_debug("after_translation", translated_html)
             else:
                 translated = translate_to_fr(base_text)
+                translated = _add_sentence_space_text(translated)
                 if display_html_override is None:
                     display_html = _plain_to_html(translated)
                 display_html = _space_around_inline_code_links(display_html or "")

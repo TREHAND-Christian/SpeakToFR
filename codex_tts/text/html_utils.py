@@ -7,6 +7,7 @@ from ..services.translator import translate_to_fr
 
 # Placeholder unique pour masquer les points internes (code, noms de fichiers, emails, domaines)
 PLACEHOLDER_DOT = "\ue001"
+PLACEHOLDER_INLINE_DOT = "\ue002"
 _INLINE_DOT_RE = re.compile(r"(?<=\w)\.(?=\w)")
 TTS_PUNCT_MAP = {
     ".": " point ",
@@ -140,6 +141,10 @@ class _SimpleHTMLStripper(HTMLParser):
         data = html.unescape(data)
         self.parts.append(data)
 
+    def handle_comment(self, data):
+        if data:
+            self.parts.append(" " * len(data))
+
     def get_text(self) -> str:
         return "".join(self.parts)
 
@@ -208,6 +213,10 @@ class _HTMLTextWithPreRanges(HTMLParser):
         else:
             self.parts.append(data)
 
+    def handle_comment(self, data):
+        if data:
+            self.parts.append(" " * len(data))
+
     def get_text_and_pre_ranges(self):
         txt = "".join(self.parts)
         return txt, self.pre_ranges
@@ -246,15 +255,15 @@ def _plain_to_html(text: str) -> str:
 
 
 def _space_around_inline_code_links(fragment: str) -> str:
-    """Ajoute un espace avant <code> et apres </code> si absent."""
+    """Ajoute un espace avant/apres <code>/<a> si absent."""
     if not fragment:
         return fragment
     import re
     out = fragment
     # Espace avant <code> si collé
-    out = re.sub(r"(?i)(?<!\s)(<\s*code\b)", r" \1", out)
+    out = re.sub(r"(?i)(?<!\s)(<\s*(?:code|a)\b)", r" \1", out)
     # Espace apres </code> si collé
-    out = re.sub(r"(?i)(</\s*code\s*>)(?=\S)", r"\1 ", out)
+    out = re.sub(r"(?i)(</\s*(?:code|a)\s*>)(?=\w)", r"\1 ", out)
     # Normalise doubles espaces autour des balises
     out = re.sub(r"\s{2,}", " ", out)
     return out
@@ -275,6 +284,15 @@ def _strip_empty_html_tags(fragment: str) -> str:
             break
         out = new_out
     return out
+
+
+def _strip_html_comments(fragment: str) -> str:
+    """Supprime les commentaires HTML (<!-- ... -->)."""
+    if not fragment:
+        return fragment
+    fragment = re.sub(r"<!--.*?-->", " ", fragment, flags=re.DOTALL)
+    # Garde-fou pour commentaires mal formes du type "<!-Finfrag"
+    return re.sub(r"<!-(?:.|\n)*?(?:-->|$)", " ", fragment)
 
 
 def _spell_punct(text: str) -> str:
@@ -309,6 +327,74 @@ def _spell_tts_paths(text: str) -> str:
     return text
 
 
+def _add_sentence_space_tts(text: str) -> str:
+    """Ajoute un espace après . ! ? quand une majuscule suit sans espace (TTS uniquement)."""
+    if not text:
+        return text
+    return re.sub(r"([.!?])(?=[A-ZÀ-ÖØ-Þ])", r"\1 ", text)
+
+
+def _add_sentence_space_text(text: str) -> str:
+    """Ajoute un espace après . ! ? quand une majuscule suit sans espace (texte affiché)."""
+    if not text:
+        return text
+    return re.sub(r"([.!?])(?=[A-ZÀ-ÖØ-Þ])", r"\1 ", text)
+
+
+
+def _add_sentence_space_html(fragment: str) -> str:
+    """Ajoute un espace après . ! ? + majuscule dans le HTML sans toucher aux tags."""
+    if not fragment:
+        return fragment
+    parts = re.split(r"(<[^>]+>)", fragment)
+    for i in range(0, len(parts), 2):
+        parts[i] = _add_sentence_space_text(parts[i])
+        parts[i] = _trim_space_before_punct(parts[i])
+    text_indices = [i for i in range(0, len(parts), 2)]
+    for idx, i in enumerate(text_indices[:-1]):
+        cur = parts[i]
+        nxt = parts[text_indices[idx + 1]].lstrip()
+        if cur and nxt and cur[-1] in '.!?' and not cur.endswith(' '):
+            if nxt[:1].isupper():
+                parts[i] = cur + ' '
+    return ''.join(parts)
+
+def _trim_space_before_punct(text: str) -> str:
+    """Supprime l'espace avant la ponctuation finale (., !, ?)."""
+    if not text:
+        return text
+    return re.sub(r"\s+([.!?])", r"\1", text).replace(" .", ".").replace(" !", "!").replace(" ?", "?")
+
+
+def _add_sentence_space_with_ranges(
+    text: str, ranges: list[tuple[int, int]]
+) -> tuple[str, list[tuple[int, int]]]:
+    """Ajoute un espace après . ! ? + majuscule et ajuste les ranges."""
+    if not text:
+        return text, ranges
+    inserts = [m.end() for m in re.finditer(r"([.!?])(?=[A-ZÀ-ÖØ-Þ])", text)]
+    if not inserts:
+        return text, ranges
+
+    chars = list(text)
+    offset = 0
+    for idx in inserts:
+        chars.insert(idx + offset, " ")
+        offset += 1
+
+    if not ranges:
+        return "".join(chars), ranges
+
+    new_ranges = []
+    for a, b in ranges:
+        shift_a = sum(1 for ins in inserts if ins <= a)
+        shift_b = sum(1 for ins in inserts if ins <= b)
+        new_ranges.append((a + shift_a, b + shift_b))
+
+    return "".join(chars), new_ranges
+
+
+
 def _strip_tts_icons(text: str) -> str:
     """Supprime les emojis/pictos pour eviter de les lire en TTS."""
     if not text:
@@ -331,23 +417,37 @@ def _unmask_code_punct_tts(text: str) -> str:
     if not text:
         return text
     # Utilise la même liste de ponctuation TTS que le reste de l'app pour cohérence
-    return text.replace(PLACEHOLDER_DOT, TTS_PUNCT_MAP.get(".", " point "))
+    out = text.replace(PLACEHOLDER_DOT, TTS_PUNCT_MAP.get(".", " point "))
+    return out.replace(PLACEHOLDER_INLINE_DOT, ".")
 
 
 def _unmask_code_punct_display(text: str) -> str:
     """Replace les symboles masqués par leur ponctuation originale pour l'affichage/surbrillance."""
     if not text:
         return text
-    return text.replace(PLACEHOLDER_DOT, ".")
+    return text.replace(PLACEHOLDER_DOT, ".").replace(PLACEHOLDER_INLINE_DOT, ".")
 
 
 def _mask_inline_dots(text: str) -> str:
-    """Masque les points insérés au milieu des mots (fichiers, emails, domaines) pour ne pas couper les phrases."""
+    """Masque les points inseres au milieu des mots (fichiers, emails, domaines) pour ne pas couper les phrases."""
     if not text:
         return text
-    out = _INLINE_DOT_RE.sub(PLACEHOLDER_DOT, text)
-    # Masque aussi un point qui démarre un bloc de mot (ex: .platform.site)
-    out = re.sub(r"(?:(?<=\s)|^)\.(?=\w)", PLACEHOLDER_DOT, out)
+
+    def _mask_inline(m):
+        nxt = text[m.end()]
+        if nxt.isupper():
+            return "."
+        return PLACEHOLDER_INLINE_DOT
+
+    def _mask_leading(m):
+        nxt = text[m.end()]
+        if nxt.isupper():
+            return "."
+        return PLACEHOLDER_INLINE_DOT
+
+    out = re.sub(r"(?<=\w)\.(?=\w)", _mask_inline, text)
+    # Masque aussi un point qui demarre un bloc de mot (ex: .platform.site)
+    out = re.sub(r"(?:(?<=\s)|^)\.(?=\w)", _mask_leading, out)
     return out
 
 
@@ -359,18 +459,21 @@ def _spell_letters_tts(text: str) -> str:
     if not text:
         return text
 
+    vowels = set("AEIOUY")
+
+    def _is_acronym(tok: str) -> bool:
+        return tok.isupper() and len(tok) >= 3 and not any(ch in vowels for ch in tok)
+
     def _spell_token(tok: str) -> str:
         token = tok
         if "/" in token:
             parts = token.split("/")
-            if all(p.isalpha() and p.isupper() and 2 <= len(p) <= 4 for p in parts):
+            if all(p.isalpha() and _is_acronym(p) for p in parts):
                 spelled_parts = [" ".join(list(p)) for p in parts]
                 return " slash ".join(spelled_parts)
         if token.isalpha():
-            if token.isupper():
-                if len(token) >= 3:
-                    return " ".join(list(token))
-                return token
+            if _is_acronym(token):
+                return " ".join(list(token))
         return tok
 
     return re.sub(r"[A-Za-z/]{2,}", lambda m: _spell_token(m.group(0)), text)
@@ -579,6 +682,7 @@ def translate_html_preserve_markup(html_fragment: str):
     """Traduit les text nodes du fragment HTML et retourne (plain, html)."""
     if not html_fragment:
         return "", ""
+    html_fragment = _strip_html_comments(html_fragment)
 
     # Fallback simple : si aucune balise, traduit comme du texte brut
     if "<" not in html_fragment:
@@ -616,7 +720,7 @@ def translate_html_preserve_markup(html_fragment: str):
             if include_plain:
                 out_plain.append(plain_text)
         elif kind == "comment":
-            out_html.append(f"<!--{tok[1]}-->")
+            pass
     translated_plain = "".join(out_plain)
     translated_html = "".join(out_html)
     return translated_plain, translated_html

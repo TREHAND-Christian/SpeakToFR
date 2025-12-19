@@ -473,7 +473,22 @@ class ControlWindow(QWidget):
     def _jump_to_sentence(self, idx: int):
         if not STATE.sentence_parts:
             return
-        idx = max(0, min(idx, len(STATE.sentence_parts) - 1))
+        max_idx = len(STATE.sentence_parts) - 1
+        idx = max(0, min(idx, max_idx))
+
+        # Saute les phrases marquees <pre> dans les deux sens.
+        skip_flags = getattr(STATE, "sentence_skip", None) or []
+        if skip_flags and 0 <= idx <= max_idx and idx < len(skip_flags):
+            if skip_flags[idx]:
+                if idx <= STATE.sentence_index:
+                    # Remonter
+                    while idx > 0 and idx < len(skip_flags) and skip_flags[idx]:
+                        idx -= 1
+                else:
+                    # Descendre
+                    while idx < max_idx and idx < len(skip_flags) and skip_flags[idx]:
+                        idx += 1
+
         STATE.sentence_index = idx
         restart_current_sentence(stop_existing=True, adjust_layout=False)
 
