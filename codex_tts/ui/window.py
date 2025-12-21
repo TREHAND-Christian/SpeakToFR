@@ -87,6 +87,7 @@ class ControlWindow(QWidget):
         self._mode = MODE_COMPLET
         self._pre_view_has_content = False
         self._show_icon_preview = False
+        self._last_saved_size = None
 
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(12, 2, 12, 4)
@@ -823,6 +824,16 @@ class ControlWindow(QWidget):
         except Exception:
             pass
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        try:
+            size = (self.width(), self.height())
+            if size != self._last_saved_size:
+                self._last_saved_size = size
+                save_window_prefs({"w": size[0], "h": size[1]})
+        except Exception:
+            pass
+
     def _apply_saved_position(self):
         data = load_window_prefs()
         if data and "x" in data and "y" in data:
@@ -834,6 +845,15 @@ class ControlWindow(QWidget):
                 pass
         else:
             self._pos_from_prefs = False
+        if data and "w" in data and "h" in data:
+            try:
+                w = int(data["w"])
+                h = int(data["h"])
+                if w > 0 and h > 0:
+                    self.resize(w, h)
+                    self._last_saved_size = (w, h)
+            except Exception:
+                pass
 
     def _apply_saved_mode(self):
         data = load_window_prefs()

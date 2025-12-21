@@ -55,6 +55,7 @@ from ..text.html_utils import (
 _VOICE_PREFS_APPLIED = False
 
 _HTML_DEBUG_DIR = Path(__file__).resolve().parents[2] / "html"
+_NO_SELECTION_TEXT = "veuillez selectionner un texte"
 
 
 def _write_html_debug(suffix: str, html_code: Optional[str]) -> None:
@@ -162,6 +163,10 @@ def speak_with_ui(
     display_html_override: Optional[str] = None,
 ):
     if not text or text.strip() == "":
+        return
+    if text.strip().lower() == _NO_SELECTION_TEXT:
+        _speak_short_message(_NO_SELECTION_TEXT)
+        _show_no_selection_alert(app)
         return
     print(f"[CodexTTS] speak_with_ui: texte recu ({len(text)} chars), reuse_ui={reuse_ui}")
     if stop_existing:
@@ -649,3 +654,53 @@ def _apply_voice_speed_prefs_once():
         except Exception:
             STATE.speed_value = 1.0
     _VOICE_PREFS_APPLIED = True
+
+
+def _speak_short_message(message: str) -> None:
+    """Lit un message court sans ouvrir la fenetre UI."""
+    try:
+        voice = STATE.voices[STATE.current_voice_index] if STATE.voices else None
+        if not voice:
+            return
+        eng = STATE.engine_for(voice)
+        if eng is None:
+            return
+        speed = get_speed_multiplier()
+
+        def worker():
+            try:
+                eng.speak_blocking(voice["token"], message, rate=speed)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception:
+        pass
+
+
+def _show_no_selection_alert(app: QApplication) -> None:
+    existing = getattr(STATE, "no_selection_box", None)
+    if existing is not None:
+        try:
+            existing.raise_()
+            existing.activateWindow()
+        except Exception:
+            pass
+        return
+    try:
+        parent = app.activeWindow() if app is not None else None
+        box = QMessageBox(parent)
+        box.setWindowTitle("CodexTTS")
+        box.setText(_NO_SELECTION_TEXT)
+        box.setIcon(QMessageBox.Warning)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.setWindowModality(Qt.ApplicationModal)
+        box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        box.setAttribute(Qt.WA_DeleteOnClose, True)
+        box.finished.connect(lambda *_: setattr(STATE, "no_selection_box", None))
+        setattr(STATE, "no_selection_box", box)
+        box.show()
+        box.raise_()
+        box.activateWindow()
+    except Exception:
+        pass
