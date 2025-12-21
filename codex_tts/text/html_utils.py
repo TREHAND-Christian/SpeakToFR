@@ -487,10 +487,9 @@ def _looks_like_french(text: str) -> bool:
     words = re.findall(r"[a-zàâäéèêëîïôöùûüç]+", lowered)
     if not words:
         return False
-    accents = any(ch in "àâäéèêëîïôöùûüç" for ch in lowered)
     stop_hits = sum(1 for w in words if w in _COMMON_SMALL_FR)
     ratio = stop_hits / max(1, len(words))
-    return accents or stop_hits >= 3 or ratio >= 0.12
+    return stop_hits >= 5 or ratio >= 0.15
 
 
 def _style_pre_blocks(html_fragment: str) -> str:

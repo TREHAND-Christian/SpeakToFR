@@ -184,13 +184,19 @@ def speak_with_ui(
     base_text = _strip_html_to_text(text) if html_fragment else text
     _write_html_debug("before_translation", html_fragment or _plain_to_html(base_text))
 
+    prefs = load_window_prefs() or {}
+    auto_detect_french = bool(prefs.get("auto_detect_french", True))
+    force_translate = bool(prefs.get("force_translate", False))
+
     # Si le texte ressemble déjà à du français, ne le retraduis pas
-    if translate_text and _looks_like_french(base_text or ""):
+    if translate_text and auto_detect_french and not force_translate and _looks_like_french(base_text or ""):
+        print("[CodexTTS] Texte detecte comme deja en francais, traduction desactivee.")
         translate_text = False
 
-    if translate_text and len(base_text) > 50000:
-        print("[CodexTTS] Texte tres long, desactivation de la traduction pour eviter un blocage.")
-        translate_text = False
+    use_fast_translation = False
+    if translate_text and len(base_text) > 20000:
+        print("[CodexTTS] Texte long, traduction simplifiee (sans preservation HTML) pour accelerer.")
+        use_fast_translation = True
     try:
         # Ouvre immediatement la fenetre HTML avec le contenu brut (en attendant la traduction)
         initial_html = display_html_override or (html_fragment if html_fragment else _plain_to_html(base_text))
@@ -581,7 +587,7 @@ def speak_with_ui(
         if translate_text:
             QTimer.singleShot(0, app, show_placeholder)
             print("[CodexTTS] translate_and_dispatch: debut traduction")
-            if display_html_override is None and html_fragment:
+            if display_html_override is None and html_fragment and not use_fast_translation:
                 # Traduire les text nodes et conserver la structure HTML
                 translated_plain, translated_html = translate_html_preserve_markup(html_fragment)
                 translated = _add_sentence_space_text(translated_plain)
