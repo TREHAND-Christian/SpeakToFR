@@ -30,6 +30,7 @@ dist/
 # ========================
 *.log
 *.tmp
+*.json
 
 # ========================
 # HTML généré
@@ -56,3 +57,15 @@ desktop.ini
 # Git (sécurité)
 # ========================
 .git/
+*.ps1
+*.iss
+*.spec
+*.zip
+*.exe
+/dist
+/html
+/output
+/build
+/.git
+/.venv
+/.vscode

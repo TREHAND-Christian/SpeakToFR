@@ -87,7 +87,7 @@ class ControlWindow(QWidget):
         self._mode = MODE_COMPLET
         self._pre_view_has_content = False
         self._show_icon_preview = False
-        self._last_saved_size = None
+        self._last_html = None
 
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(12, 2, 12, 4)
@@ -265,7 +265,7 @@ class ControlWindow(QWidget):
         self.pre_view.setReadOnly(True)
         self.pre_view.setVisible(False)
         self.pre_view.setStyleSheet(
-            "QTextEdit { background: #000000; color: #ffffff; font-family: Consolas, monospace; }"
+            "QTextEdit { background: #000000; color: #ffffff; font-family: Consolas, monospace; border: 2px solid #ffffff; }"
         )
 
         self.text_edit.setReadOnly(True)
@@ -273,6 +273,7 @@ class ControlWindow(QWidget):
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._apply_text_background_contrast()
         self._main_layout.addWidget(self.text_edit)
         self._main_layout.addWidget(self.pre_view)
 
@@ -579,6 +580,161 @@ class ControlWindow(QWidget):
             self.top_bar.layout().setContentsMargins(0, 0, 0, 0)
             self.top_bar.layout().setSpacing(1)
 
+    def _apply_text_background_contrast(self) -> None:
+        html_bg = self._detect_html_background_color(self._last_html)
+        if html_bg is not None:
+            base_color = html_bg
+        else:
+            html_text = self._detect_html_text_color(self._last_html)
+            text_color = html_text or self._detect_rendered_text_color() or self._detect_default_text_color()
+            luminance = (0.299 * text_color.red()) + (0.587 * text_color.green()) + (0.114 * text_color.blue())
+            base_color = QColor("#ffffff") if luminance < 128 else QColor("#000000")
+        palette = self.text_edit.palette()
+        palette.setColor(QPalette.Base, base_color)
+        self.text_edit.setPalette(palette)
+
+    def _detect_default_text_color(self) -> QColor:
+        doc = self.text_edit.document()
+        text = doc.toPlainText()
+        idx = 0
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
+        cursor = QTextCursor(doc)
+        if idx < len(text):
+            cursor.setPosition(idx)
+        fmt = cursor.charFormat()
+        brush = fmt.foreground()
+        if brush.style() != Qt.NoBrush:
+            color = brush.color()
+            if color.isValid():
+                return color
+        return self.text_edit.palette().color(QPalette.Text)
+
+    def _detect_rendered_text_color(self) -> Optional[QColor]:
+        try:
+            viewport = self.text_edit.viewport()
+            pixmap = viewport.grab()
+            img = pixmap.toImage()
+            w = img.width()
+            h = img.height()
+            if w <= 0 or h <= 0:
+                return None
+
+            def color_at(x: int, y: int) -> QColor:
+                return QColor(img.pixel(x, y))
+
+            bg_samples = [
+                color_at(2, 2),
+                color_at(w - 3, 2),
+                color_at(2, h - 3),
+                color_at(w - 3, h - 3),
+            ]
+            bg = QColor(
+                sum(c.red() for c in bg_samples) // len(bg_samples),
+                sum(c.green() for c in bg_samples) // len(bg_samples),
+                sum(c.blue() for c in bg_samples) // len(bg_samples),
+            )
+
+            step = max(2, min(w, h) // 80)
+            hist = {}
+
+            def color_key(c: QColor) -> int:
+                return ((c.red() // 8) << 10) | ((c.green() // 8) << 5) | (c.blue() // 8)
+
+            def color_dist(a: QColor, b: QColor) -> int:
+                return abs(a.red() - b.red()) + abs(a.green() - b.green()) + abs(a.blue() - b.blue())
+
+            for y in range(0, h, step):
+                for x in range(0, w, step):
+                    c = color_at(x, y)
+                    if color_dist(c, bg) < 12:
+                        continue
+                    key = color_key(c)
+                    hist[key] = hist.get(key, 0) + 1
+
+            if not hist:
+                return None
+
+            best_key = max(hist, key=hist.get)
+            r = ((best_key >> 10) & 0x1F) * 8 + 4
+            g = ((best_key >> 5) & 0x1F) * 8 + 4
+            b = (best_key & 0x1F) * 8 + 4
+            return QColor(r, g, b)
+        except Exception:
+            return None
+
+    def _detect_html_background_color(self, html_code: Optional[str]) -> Optional[QColor]:
+        if not html_code:
+            return None
+        try:
+            m = re.search(r"background-color\s*:\s*([^;\"']+)", html_code, flags=re.IGNORECASE)
+            if m:
+                c = self._parse_css_color(m.group(1))
+                if c is not None:
+                    return c
+            m = re.search(r"bgcolor\s*=\s*[\"']?([^\"'>\s]+)", html_code, flags=re.IGNORECASE)
+            if m:
+                c = self._parse_css_color(m.group(1))
+                if c is not None:
+                    return c
+        except Exception:
+            return None
+        return None
+
+    def _detect_html_text_color(self, html_code: Optional[str]) -> Optional[QColor]:
+        if not html_code:
+            return None
+        try:
+            for m in re.finditer(r"color\s*:\s*([^;\"']+)", html_code, flags=re.IGNORECASE):
+                prefix = html_code[max(0, m.start() - 12):m.start()].lower()
+                if "background-" in prefix:
+                    continue
+                c = self._parse_css_color(m.group(1))
+                if c is not None:
+                    return c
+            m = re.search(r"color\s*=\s*[\"']?([^\"'>\s]+)", html_code, flags=re.IGNORECASE)
+            if m:
+                c = self._parse_css_color(m.group(1))
+                if c is not None:
+                    return c
+        except Exception:
+            return None
+        return None
+
+    def _parse_css_color(self, value: str) -> Optional[QColor]:
+        if not value:
+            return None
+        s = value.strip().lower()
+        if s.startswith("#"):
+            hexv = s[1:]
+            if len(hexv) == 3:
+                try:
+                    r = int(hexv[0] * 2, 16)
+                    g = int(hexv[1] * 2, 16)
+                    b = int(hexv[2] * 2, 16)
+                    return QColor(r, g, b)
+                except Exception:
+                    return None
+            if len(hexv) == 6:
+                try:
+                    r = int(hexv[0:2], 16)
+                    g = int(hexv[2:4], 16)
+                    b = int(hexv[4:6], 16)
+                    return QColor(r, g, b)
+                except Exception:
+                    return None
+            return None
+        m = re.match(r"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", s)
+        if m:
+            try:
+                r = int(m.group(1))
+                g = int(m.group(2))
+                b = int(m.group(3))
+                return QColor(r, g, b)
+            except Exception:
+                return None
+        return None
+
     def _handle_collapse_button(self):
         mode = getattr(self, "_mode", MODE_COMPLET)
         if mode == MODE_COMPLET:
@@ -697,8 +853,10 @@ class ControlWindow(QWidget):
                 self.text_edit.setHtml(h)
             else:
                 self.text_edit.setHtml(f"<html><body>{h}</body></html>")
+            self._last_html = h
         else:
             self.text_edit.setPlainText(text)
+            self._last_html = None
 
         # Affichage des blocs <pre> dans un panneau séparé (visuel uniquement)
         try:
@@ -731,6 +889,7 @@ class ControlWindow(QWidget):
         if getattr(self, "_mode", MODE_COMPLET) != MODE_COMPLET:
             self.pre_view.setVisible(False)
 
+        QTimer.singleShot(0, self._apply_text_background_contrast)
         self.schedule_adjust()
 
     def apply_highlight(self, start: int, end: int):
@@ -824,16 +983,6 @@ class ControlWindow(QWidget):
         except Exception:
             pass
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        try:
-            size = (self.width(), self.height())
-            if size != self._last_saved_size:
-                self._last_saved_size = size
-                save_window_prefs({"w": size[0], "h": size[1]})
-        except Exception:
-            pass
-
     def _apply_saved_position(self):
         data = load_window_prefs()
         if data and "x" in data and "y" in data:
@@ -845,15 +994,6 @@ class ControlWindow(QWidget):
                 pass
         else:
             self._pos_from_prefs = False
-        if data and "w" in data and "h" in data:
-            try:
-                w = int(data["w"])
-                h = int(data["h"])
-                if w > 0 and h > 0:
-                    self.resize(w, h)
-                    self._last_saved_size = (w, h)
-            except Exception:
-                pass
 
     def _apply_saved_mode(self):
         data = load_window_prefs()

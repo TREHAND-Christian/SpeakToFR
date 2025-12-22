@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SpeakToFR - Aide</title>
+    <style>
+      :root {
+        --bg: #0f1216;
+        --panel: #161b22;
+        --text: #e6edf3;
+        --muted: #9aa4b2;
+        --accent: #ffd166;
+        --accent-2: #79c0ff;
+      }
+      body {
+        margin: 0;
+        padding: 32px;
+        font-family: "Trebuchet MS", "Segoe UI", Arial, sans-serif;
+        background: radial-gradient(1200px 500px at 10% -10%, #1f2937, transparent),
+          radial-gradient(900px 400px at 110% 0%, #1c2530, transparent),
+          var(--bg);
+        color: var(--text);
+      }
+      .card {
+        max-width: 860px;
+        margin: 0 auto;
+        background: var(--panel);
+        border: 1px solid #2b3440;
+        border-radius: 16px;
+        padding: 24px 28px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      }
+      h1 {
+        margin: 0 0 8px 0;
+        font-size: 28px;
+        letter-spacing: 0.2px;
+      }
+      .subtitle {
+        color: var(--muted);
+        font-size: 14px;
+        margin-bottom: 18px;
+      }
+      h2 {
+        margin: 22px 0 8px 0;
+        font-size: 18px;
+        color: var(--accent);
+      }
+      p, li {
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      code {
+        background: #0b0f14;
+        border: 1px solid #2b3440;
+        padding: 2px 6px;
+        border-radius: 6px;
+        color: var(--accent-2);
+      }
+      .callout {
+        margin-top: 16px;
+        padding: 12px 14px;
+        background: #0c1118;
+        border-left: 3px solid var(--accent);
+        border-radius: 8px;
+      }
+      .footer {
+        margin-top: 20px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>SpeakToFR - Aide rapide</h1>
+      <div class="subtitle">Synthese vocale et traduction FR depuis le presse-papiers.</div>
+
+      <h2>Demarrage rapide</h2>
+      <ul>
+        <li>Selectionne du texte puis copie-le.</li>
+        <li>Appuie sur <code>Ctrl + Alt + Entree</code> pour lancer la lecture.</li>
+        <li>Si aucun texte n'est selectionne, une alerte s'affiche.</li>
+      </ul>
+
+      <h2>Fenetre de controle</h2>
+      <ul>
+        <li>Choisir la voix dans la liste.</li>
+        <li>Regler la vitesse avec le curseur.</li>
+        <li>Naviguer entre les phrases avec les boutons.</li>
+      </ul>
+
+      <h2>Conseils</h2>
+      <p>
+        Si la voix ne s'entend pas, verifie que des voix Windows sont installees
+        et que le volume systeme est actif.
+      </p>
+
+      <div class="callout">
+        Astuce: laisse l'app active en arriere-plan. Le raccourci fonctionne
+        sans ouvrir la fenetre tant qu'un texte n'est pas disponible.
+      </div>
+
+      <div class="footer">Version 1.0.0</div>
+    </div>
+  </body>
+</html>

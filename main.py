@@ -17,11 +17,12 @@ for _d in (_pyside_dir, _pyside_dir / "lib"):
             pass
         os.environ["PATH"] = str(_d) + os.pathsep + os.environ.get("PATH", "")
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPainter, QColor, QPixmap
+from PySide6.QtCore import Qt, QUrl, QSharedMemory
+from PySide6.QtGui import QIcon, QPainter, QColor, QPixmap, QDesktopServices
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from codex_tts.core.state import STATE
+from codex_tts.ui.prefs import load_window_prefs
 from codex_tts.services.watcher import clipboard_loop
 from codex_tts.services.hotkeys import hotkey_loop, stop_hotkey_loop
 from codex_tts.playback.control import stop_playback
@@ -37,6 +38,10 @@ def main():
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    singleton = QSharedMemory("SpeakToFR.Singleton")
+    if not singleton.create(1):
+        return
+    setattr(app, "_single_instance_guard", singleton)
     tray_icon = None
     hotkey_thread = None
     hotkey_enabled = True
@@ -133,8 +138,17 @@ def main():
             tray_icon.setIcon(_make_status_icon("#2ecc71" if hotkey_enabled else "#e74c3c"))
             tray_icon.setToolTip("SpeakToFR")
 
+    def _open_help():
+        try:
+            help_path = Path(sys.argv[0]).resolve().parent / "help.html"
+            if help_path.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(help_path)))
+        except Exception:
+            pass
+
     def _init_tray():
         nonlocal tray_icon, hotkey_thread, hotkey_enabled
+        hotkey_enabled = True
         tray_icon = QSystemTrayIcon()
         tray_icon.setIcon(_make_status_icon("#2ecc71"))
         tray_icon.setToolTip("SpeakToFR")
@@ -150,6 +164,10 @@ def main():
         autostart_action.setCheckable(True)
         autostart_action.setChecked(_get_autostart_enabled())
         autostart_action.triggered.connect(lambda checked: _set_autostart_enabled(checked))
+
+        menu.addSeparator()
+        help_action = menu.addAction("Aide")
+        help_action.triggered.connect(_open_help)
 
         menu.addSeparator()
         quit_action = menu.addAction("Quitter")
