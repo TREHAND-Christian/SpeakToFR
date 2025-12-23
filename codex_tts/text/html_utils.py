@@ -104,7 +104,7 @@ class _SimpleHTMLStripper(HTMLParser):
         self.parts = []
         self.stack = []
         self.skip = 0
-        self.SPELL_TAGS = {"code"}
+        self.SPELL_TAGS = {"code", "a"}
         self.SKIP_TAGS = {"pre", "script", "style"}
 
     def handle_starttag(self, tag, attrs):
@@ -171,7 +171,7 @@ class _HTMLTextWithPreRanges(HTMLParser):
         self.pre_depth = 0
         self.pre_ranges = []
         self._pre_start = None
-        self.SPELL_TAGS = {"code"}
+        self.SPELL_TAGS = {"code", "a"}
 
     def handle_starttag(self, tag, attrs):
         t = tag.lower()

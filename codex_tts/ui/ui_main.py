@@ -33,6 +33,8 @@ from ..text.html_utils import (
     _space_around_inline_code_links,
     _strip_empty_html_tags,
     _strip_html_comments,
+    PLACEHOLDER_DOT,
+    _spell_punct,
     _mask_code_punct,
     _unmask_code_punct_tts,
     _unmask_code_punct_display,
@@ -279,6 +281,8 @@ def speak_with_ui(
                 tts_s = _spell_tts_http(tts_s)
             tts_s = _spell_tts_paths(tts_s)
             tts_s = _strip_tts_icons(tts_s)
+            if PLACEHOLDER_DOT in masked_slice:
+                tts_s = _spell_punct(tts_s)
             tts_s = _add_sentence_space_tts(tts_s)
             tts_s = _spell_letters_tts(tts_s)
             STATE.sentence_parts_tts.append(tts_s)
