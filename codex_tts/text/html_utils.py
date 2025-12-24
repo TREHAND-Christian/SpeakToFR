@@ -255,26 +255,16 @@ def _plain_to_html(text: str) -> str:
 
 
 def _space_around_inline_code_links(fragment: str) -> str:
-    """Ajoute des espaces autour de <code>, <strong> et <a>, sans autre modification."""
+    """Ajoute un espace avant/apres <code>/<a> si absent."""
     if not fragment:
         return fragment
     import re
     out = fragment
-
-    # Espace DEVANT <code> si collé
-    out = re.sub(r"(?i)(?<!\s)(<\s*code\b)", r" \1", out)
-    # Espace APRÈS </code> si collé
-    out = re.sub(r"(?i)(</\s*code\s*>)(?=\S)", r"\1 ", out)
-
-    # Espace DEVANT <strong> si collé
-    out = re.sub(r"(?i)(?<!\s)(<\s*strong\b)", r" \1", out)
-
-    # Espace DEVANT <a> si collé
-    out = re.sub(r"(?i)(?<!\s)(<\s*a\b)", r" \1", out)
-    # Espace APRÈS </a> si collé
-    out = re.sub(r"(?i)(</\s*a\s*>)(?=\S)", r"\1 ", out)
-
-    # Normalise doubles espaces
+    # Espace avant <code> si collé
+    out = re.sub(r"(?i)(?<!\s)(<\s*(?:code|a)\b)", r" \1", out)
+    # Espace apres </code> si collé
+    out = re.sub(r"(?i)(</\s*(?:code|a)\s*>)(?=\w)", r"\1 ", out)
+    # Normalise doubles espaces autour des balises
     out = re.sub(r"\s{2,}", " ", out)
     return out
 
@@ -688,6 +678,8 @@ def _render_attrs(attrs):
 
 
 def translate_html_preserve_markup(html_fragment: str):
+    # Supprime les <img> du HTML (évite pollution visuelle dans l'app)
+    html_fragment = re.sub(r"<img[^>]*>", " ", html_fragment, flags=re.IGNORECASE)
     """Traduit les text nodes du fragment HTML et retourne (plain, html)."""
     if not html_fragment:
         return "", ""
