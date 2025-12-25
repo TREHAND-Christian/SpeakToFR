@@ -1003,9 +1003,4 @@ class ControlWindow(QWidget):
         if "mode" in data:
             self._set_mode(data.get("mode"), persist=False)
             return
-
-        # Retro-compat : anciennes prefs
-        if data.get("collapsed") is True:
-            self._set_mode(MODE_MINI, persist=False)
-        else:
-            self._set_mode(MODE_COMPLET, persist=False)
+        self._set_mode(MODE_COMPLET, persist=False)

@@ -260,10 +260,18 @@ def _space_around_inline_code_links(fragment: str) -> str:
         return fragment
     import re
     out = fragment
+    # Cas courant: "<code><pre></code>" doit afficher le texte "<pre>".
+    out = re.sub(
+        r"(?is)<code([^>]*)>\s*<pre[^>]*>\s*</code>",
+        r"<code\1>&lt;pre&gt;</code>",
+        out,
+    )
     # Espace avant <code> si collé
     out = re.sub(r"(?i)(?<!\s)(<\s*(?:code|a)\b)", r" \1", out)
     # Espace apres </code> si collé
     out = re.sub(r"(?i)(</\s*(?:code|a)\s*>)(?=\w)", r"\1 ", out)
+    # Espace apres </code> avant un tag collé
+    out = re.sub(r"(?i)(</\s*(?:code|a)\s*>)(?=<)", r"\1 ", out)
     # Normalise doubles espaces autour des balises
     out = re.sub(r"\s{2,}", " ", out)
     return out

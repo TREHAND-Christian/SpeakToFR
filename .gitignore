@@ -57,6 +57,7 @@ desktop.ini
 # Git (sécurité)
 # ========================
 .git/
+*.json
 *.ps1
 *.iss
 *.spec

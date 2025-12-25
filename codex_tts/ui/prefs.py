@@ -20,6 +20,9 @@ def save_window_prefs(data: dict) -> None:
     try:
         current = load_window_prefs() or {}
         current.update(data)
+        # Ne jamais persister la taille de la fenetre.
+        current.pop("w", None)
+        current.pop("h", None)
         path.write_text(json.dumps(current), encoding="utf-8")
     except Exception:
         pass

@@ -34,6 +34,7 @@ from ..text.html_utils import (
     _strip_empty_html_tags,
     _strip_html_comments,
     PLACEHOLDER_DOT,
+    PLACEHOLDER_INLINE_DOT,
     _spell_punct,
     _mask_code_punct,
     _unmask_code_punct_tts,
@@ -281,7 +282,7 @@ def speak_with_ui(
                 tts_s = _spell_tts_http(tts_s)
             tts_s = _spell_tts_paths(tts_s)
             tts_s = _strip_tts_icons(tts_s)
-            if PLACEHOLDER_DOT in masked_slice:
+            if PLACEHOLDER_DOT in masked_slice or PLACEHOLDER_INLINE_DOT in masked_slice:
                 tts_s = _spell_punct(tts_s)
             tts_s = _add_sentence_space_tts(tts_s)
             tts_s = _spell_letters_tts(tts_s)
@@ -423,6 +424,8 @@ def speak_with_ui(
                         tts_s = _spell_tts_http(tts_s)
                     tts_s = _spell_tts_paths(tts_s)
                     tts_s = _strip_tts_icons(tts_s)
+                    if PLACEHOLDER_DOT in s or PLACEHOLDER_INLINE_DOT in s:
+                        tts_s = _spell_punct(tts_s)
                     tts_s = _add_sentence_space_tts(tts_s)
                     tts_s = _spell_letters_tts(tts_s)
                     tts_parts.append(tts_s)
