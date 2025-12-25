@@ -531,10 +531,44 @@ def _style_pre_blocks(html_fragment: str) -> str:
     def _process_pre(match):
         inner = match.group(1)
 
-        # Nettoyage des tags internes (comme avant)
-        inner_clean = re.sub(r"<(\w+)(?:\s[^>/]*?)?>", _strip_attrs, inner)
+        # Qt/QTextEdit est très sensible au HTML mal formé dans <pre>.
+        # On convertit donc le contenu en TEXTE BRUT (tags supprimés),
+        # puis on échappe (<, >, &) pour éviter toute interprétation HTML.
+        txt = inner
 
-        # Style INLINE (fiable dans Qt)
+        # Préserve les retours ligne implicites avant suppression des tags
+        txt = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", txt)
+        txt = re.sub(r"(?i)</\s*(p|div|li|tr|h\d)\s*>", "\n", txt)
+        txt = re.sub(r"(?i)<\s*li\s*>", "• ", txt)
+
+        # Supprime tous les tags restants
+        txt = re.sub(r"(?s)<[^>]+>", "", txt)
+
+        # Décode les entités HTML existantes (ex: &nbsp;)
+        txt = html.unescape(txt)
+
+        # Normalise les fins de ligne
+        txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Convertit les tabulations en espaces (Qt peut afficher les tabs bizarrement)
+        txt = txt.replace("\t", "    ")
+
+        # Échappe pour l'HTML Qt
+        esc = html.escape(txt, quote=False)
+
+        # Préserve l'indentation : convertit les espaces en début de ligne en &nbsp;
+        lines = esc.split("\n")
+        out_lines = []
+        for line in lines:
+            m = re.match(r"( +)(.*)$", line)
+            if m:
+                lead = "&nbsp;" * len(m.group(1))
+                out_lines.append(lead + m.group(2))
+            else:
+                out_lines.append(line)
+        esc = "<br/>".join(out_lines)
+
+        # Style INLINE (le plus fiable dans Qt)
         pre_style = (
             "background:#000 !important;"
             "color:#fff !important;"
@@ -542,13 +576,10 @@ def _style_pre_blocks(html_fragment: str) -> str:
             "display:block !important;"
             "border-radius:4px !important;"
             "font-family:monospace !important;"
-            "white-space:pre-wrap !important;"
+            "white-space:pre !important;"
         )
 
-        # Force la couleur à l'intérieur (héritage parfois foireux dans Qt)
-        inner_clean = f'<span style="color:#fff !important;">{inner_clean}</span>'
-
-        return f'<pre style="{pre_style}">{inner_clean}</pre>'
+        return f'<pre style="{pre_style}">{esc}</pre>'
 
     # Remplace tous les <pre ...>...</pre> par des <pre style="...">...</pre>
     pre_blocks = []

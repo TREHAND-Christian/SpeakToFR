@@ -34,7 +34,6 @@ from ..text.html_utils import (
     _strip_empty_html_tags,
     _strip_html_comments,
     PLACEHOLDER_DOT,
-    PLACEHOLDER_INLINE_DOT,
     _spell_punct,
     _mask_code_punct,
     _unmask_code_punct_tts,
@@ -224,13 +223,59 @@ def speak_with_ui(
         # Texte pour positions/TTS :
         # - On conserve le contenu des <pre> (pour l'affichage),
         # - mais on enregistre ses ranges afin de l'ignorer en TTS/surlignage.
+        # Texte pour positions/TTS :
+        # - On conserve le contenu des <pre> pour l'affichage,
+        # - mais on masque son contenu dans la version "masked" (TTS/surlignage).
         pre_ranges = []
         if display_html:
-            display_plain_masked, pre_ranges = _strip_html_to_text_with_pre_ranges(display_html)
+            display_plain_with_pre, pre_ranges = _strip_html_to_text_with_pre_ranges(display_html)
+
+            def _mask_ranges_keep_newlines(text: str, ranges: list[tuple[int, int]]) -> str:
+                if not ranges:
+                    return text
+                chars = list(text)
+                for a, b in ranges:
+                    a = max(0, a); b = min(len(chars), b)
+                    for k in range(a, b):
+                        if chars[k] != "\n":
+                            chars[k] = " "
+                return "".join(chars)
+
+            # Version masquée : même longueur, mais <pre> => espaces (on garde les \n)
+            display_plain_masked = _mask_ranges_keep_newlines(display_plain_with_pre, pre_ranges)
+
+            # Ajoute un espace après . ! ? quand une majuscule suit sans espace, sur masked + unmasked (mêmes indices)
+            import re
+            inserts = [m.end() for m in re.finditer(r"([.!?])(?=[A-ZÀ-ÖØ-Þ])", display_plain_masked)]
+
+            def _apply_inserts(s: str, ins: list[int]) -> str:
+                if not ins:
+                    return s
+                chars = list(s)
+                offset = 0
+                for pos in ins:
+                    chars.insert(pos + offset, " ")
+                    offset += 1
+                return "".join(chars)
+
+            display_plain_masked = _apply_inserts(display_plain_masked, inserts)
+            display_plain_with_pre = _apply_inserts(display_plain_with_pre, inserts)
+
+            # Ajuste les pre_ranges (inserts ajoutés avant les bornes)
+            if pre_ranges and inserts:
+                new_ranges = []
+                for a, b in pre_ranges:
+                    shift_a = sum(1 for ins in inserts if ins <= a)
+                    shift_b = sum(1 for ins in inserts if ins <= b)
+                    new_ranges.append((a + shift_a, b + shift_b))
+                pre_ranges = new_ranges
+
+            # Version affichable : on démasque la ponctuation dans <code>/<a>
+            display_plain_unmasked = _unmask_code_punct_display(display_plain_with_pre)
         else:
             display_plain_masked = fr_text or ""
+            display_plain_unmasked = fr_text or ""
             pre_ranges = []
-
         # Masque les points internes (domaine, email, fichiers) pour ne pas couper les phrases
         display_plain_masked = _mask_inline_dots(display_plain_masked)
         display_plain_masked, pre_ranges = _add_sentence_space_with_ranges(display_plain_masked, pre_ranges)
@@ -282,7 +327,7 @@ def speak_with_ui(
                 tts_s = _spell_tts_http(tts_s)
             tts_s = _spell_tts_paths(tts_s)
             tts_s = _strip_tts_icons(tts_s)
-            if PLACEHOLDER_DOT in masked_slice or PLACEHOLDER_INLINE_DOT in masked_slice:
+            if PLACEHOLDER_DOT in masked_slice:
                 tts_s = _spell_punct(tts_s)
             tts_s = _add_sentence_space_tts(tts_s)
             tts_s = _spell_letters_tts(tts_s)
@@ -424,8 +469,6 @@ def speak_with_ui(
                         tts_s = _spell_tts_http(tts_s)
                     tts_s = _spell_tts_paths(tts_s)
                     tts_s = _strip_tts_icons(tts_s)
-                    if PLACEHOLDER_DOT in s or PLACEHOLDER_INLINE_DOT in s:
-                        tts_s = _spell_punct(tts_s)
                     tts_s = _add_sentence_space_tts(tts_s)
                     tts_s = _spell_letters_tts(tts_s)
                     tts_parts.append(tts_s)
