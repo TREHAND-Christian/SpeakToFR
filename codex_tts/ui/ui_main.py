@@ -12,6 +12,7 @@ from ..core.state import STATE
 from ..playback.control import restart_current_sentence, stop_playback
 from ..services.clipboard import set_clipboard_text
 from ..services.translator import translate_to_fr
+from ..services.html_inliner import inline_html_with_computed_styles
 from ..core.tts_engine import (
     tts_stop,
     tts_pause,
@@ -163,6 +164,7 @@ def speak_with_ui(
     adjust_layout: bool = True,
     translate_text: bool = True,
     display_html_override: Optional[str] = None,
+    source_url: Optional[str] = None,
 ):
     if not text or text.strip() == "":
         return
@@ -650,14 +652,25 @@ def speak_with_ui(
                 translated_html = _add_sentence_space_html(translated_html)
                 translated_html = _space_around_inline_code_links(translated_html)
                 display_html = _style_pre_blocks(translated_html)
-                allow_highlight = True  # on laisse le highlight actif sur le texte traduit
+                # Optionnel: inline des styles calculés (Chromium headless) pour un rendu fidèle
+                if source_url:
+                    try:
+                        res = inline_html_with_computed_styles(source_url, display_html, remove_images=True)
+                        if res.ok and res.html:
+                            display_html = res.html
+                            allow_highlight = False  # on n'essaie pas de surligner dans un HTML ultra-riche
+                        else:
+                            print(f"[CodexTTS] inline_styles: fallback (\"{res.error}\")")
+                    except Exception as e:
+                        print(f"[CodexTTS] inline_styles: erreur {e}")
                 _write_html_debug("after_translation", translated_html)
             else:
                 translated = translate_to_fr(base_text)
                 translated = _add_sentence_space_text(translated)
                 if display_html_override is None:
                     display_html = _plain_to_html(translated)
-                display_html = _space_around_inline_code_links(display_html or "")
+                if display_html_override is None:
+                    display_html = _space_around_inline_code_links(display_html or "")
             print("[CodexTTS] translate_and_dispatch: traduction terminee")
             try:
                 same = translated == base_text

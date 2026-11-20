@@ -7,7 +7,7 @@ from ctypes import wintypes
 
 import win32con
 
-from codex_tts.services.clipboard import get_clipboard_text, set_clipboard_text
+from codex_tts.services.clipboard import get_clipboard_text, get_clipboard_payload, set_clipboard_text
 from codex_tts.core.config import TAG, HOTKEY_ID, MOD_CTRL_ALT, VK_ENTER, AHK_PATH, AHK_EXE
 
 user32 = ctypes.windll.user32
@@ -111,17 +111,27 @@ def hotkey_loop():
 
             real_ctrl_c()
 
+            
             # Attendre un vrai changement du presse-papiers
             new = ""
+            payload = {"type": "text", "text": "", "html": None, "url": None}
             for _ in range(30):  # ~1.5s max
                 time.sleep(0.05)
-                cur = get_clipboard_text()
+                payload = get_clipboard_payload()
+                cur = payload.get("html") or payload.get("text") or ""
                 if cur != before:
                     new = cur
                     break
 
             if new.strip():
-                tagged = f"{TAG}\n{new}"
+                if payload.get("type") == "html" and payload.get("html"):
+                    import json
+                    tagged = f"{TAG}\n" + json.dumps(
+                        {"type": "html", "html": payload.get("html"), "url": payload.get("url")},
+                        ensure_ascii=False,
+                    )
+                else:
+                    tagged = f"{TAG}\n{new}"
             else:
                 tagged = f"{TAG}\nveuillez selectionner un texte"
 

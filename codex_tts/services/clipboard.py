@@ -44,6 +44,19 @@ def _decode_html_bytes(raw) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
+
+def _source_url_from_cf_html(data: str) -> str | None:
+    """Extrait SourceURL:... depuis le header CF_HTML si présent."""
+    try:
+        data = data.replace("\x00", "")
+        for line in data.splitlines():
+            if line.startswith("SourceURL:"):
+                url = line.split(":", 1)[1].strip()
+                return url or None
+    except Exception:
+        pass
+    return None
+
 def _html_fragment_from_cf_html(data: str) -> str:
     """Extrait le fragment HTML (CF_HTML Windows) de manière robuste."""
     data = data.replace("\x00", "")
@@ -82,6 +95,38 @@ def _html_fragment_from_cf_html(data: str) -> str:
         pass
     return data
 
+
+
+def get_clipboard_payload(retries: int = 3, delay: float = 0.05) -> dict:
+    """Retourne un dict:
+    - type: 'html' si CF_HTML dispo, sinon 'text'
+    - html: fragment HTML (si type html)
+    - url: SourceURL (si dispo)
+    - text: texte unicode (si dispo)
+    """
+    payload = {"type": "text", "text": "", "html": None, "url": None}
+    for _ in range(max(1, retries)):
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                cf_html = win32clipboard.RegisterClipboardFormat("HTML Format")
+                if win32clipboard.IsClipboardFormatAvailable(cf_html):
+                    raw = win32clipboard.GetClipboardData(cf_html)
+                    raw_str = _decode_html_bytes(raw)
+                    fragment = _html_fragment_from_cf_html(raw_str)
+                    url = _source_url_from_cf_html(raw_str)
+                    if fragment and fragment.strip():
+                        payload["type"] = "html"
+                        payload["html"] = fragment
+                        payload["url"] = url
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                    payload["text"] = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT) or ""
+            finally:
+                win32clipboard.CloseClipboard()
+            break
+        except Exception:
+            time.sleep(delay)
+    return payload
 
 def get_clipboard_text(retries: int = 3, delay: float = 0.05) -> str:
     """Retourne du HTML brut si disponible, sinon du texte Unicode."""

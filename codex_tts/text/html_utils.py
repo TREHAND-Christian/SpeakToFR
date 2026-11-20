@@ -1,5 +1,7 @@
 import html
 import re
+import html as _html
+
 from html.parser import HTMLParser
 from typing import Optional
 
@@ -528,47 +530,43 @@ def _style_pre_blocks(html_fragment: str) -> str:
         # Conserve les balises sans attributs (on ne garde pas les attrs)
         return f"<{tag}>"
 
+
     def _process_pre(match):
-        inner = match.group(1)
+        inner = match.group(1) or ""
 
-        # Qt/QTextEdit est très sensible au HTML mal formé dans <pre>.
-        # On convertit donc le contenu en TEXTE BRUT (tags supprimés),
-        # puis on échappe (<, >, &) pour éviter toute interprétation HTML.
-        txt = inner
+        # 1) Convertit le contenu du <pre> en TEXTE BRUT (Qt déteste les <span>/<div> cassés dedans)
+        #    On enlève toutes les balises (ouvrantes ET fermantes).
+        text = re.sub(r"</?[^>]+>", "", inner)
 
-        # Préserve les retours ligne implicites avant suppression des tags
-        txt = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", txt)
-        txt = re.sub(r"(?i)</\s*(p|div|li|tr|h\d)\s*>", "\n", txt)
-        txt = re.sub(r"(?i)<\s*li\s*>", "• ", txt)
+        # 2) Normalise les retours ligne
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
 
-        # Supprime tous les tags restants
-        txt = re.sub(r"(?s)<[^>]+>", "", txt)
+        # 3) Tabulations -> 4 espaces (ajuste si tu préfères 2/8)
+        text = text.replace("\t", "    ")
 
-        # Décode les entités HTML existantes (ex: &nbsp;)
-        txt = html.unescape(txt)
+        # 4) Décodage des entités puis ré-échappement (affichage fidèle du code)
+        text = _html.unescape(text)
+        text = (text
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
 
-        # Normalise les fins de ligne
-        txt = txt.replace("\r\n", "\n").replace("\r", "\n")
-
-        # Convertit les tabulations en espaces (Qt peut afficher les tabs bizarrement)
-        txt = txt.replace("\t", "    ")
-
-        # Échappe pour l'HTML Qt
-        esc = html.escape(txt, quote=False)
-
-        # Préserve l'indentation : convertit les espaces en début de ligne en &nbsp;
-        lines = esc.split("\n")
-        out_lines = []
+        # 5) Prépare chaque ligne : indentation préservée (espaces de début -> &nbsp;)
+        lines = text.split("\n")
+        fixed_lines = []
         for line in lines:
-            m = re.match(r"( +)(.*)$", line)
-            if m:
-                lead = "&nbsp;" * len(m.group(1))
-                out_lines.append(lead + m.group(2))
-            else:
-                out_lines.append(line)
-        esc = "<br/>".join(out_lines)
+            # compte les espaces en début de ligne
+            leading = len(line) - len(line.lstrip(" "))
+            if leading:
+                line = ("&nbsp;" * leading) + line[leading:]
+            # IMPORTANT: une ligne vide doit rester visible => &nbsp;
+            if line == "":
+                line = "&nbsp;"
+            fixed_lines.append(line)
 
-        # Style INLINE (le plus fiable dans Qt)
+        inner_html = "<br/>".join(fixed_lines)
+
+        # Style INLINE (fiable dans Qt)
         pre_style = (
             "background:#000 !important;"
             "color:#fff !important;"
@@ -576,10 +574,14 @@ def _style_pre_blocks(html_fragment: str) -> str:
             "display:block !important;"
             "border-radius:4px !important;"
             "font-family:monospace !important;"
-            "white-space:pre !important;"
+            # On gère nous-mêmes les retours/espaces avec <br/> et &nbsp;
+            "white-space:normal !important;"
         )
 
-        return f'<pre style="{pre_style}">{esc}</pre>'
+        # Force la couleur à l'intérieur (héritage parfois foireux dans Qt)
+        inner_html = f'<span style="color:#fff !important;">{inner_html}</span>'
+
+        return f'<pre style="{pre_style}">{inner_html}</pre>'
 
     # Remplace tous les <pre ...>...</pre> par des <pre style="...">...</pre>
     pre_blocks = []
