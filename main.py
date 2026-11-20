@@ -1,4 +1,5 @@
-"""Point d'entree principal de CodexTTS (Fluent / PySide6)."""
+"""Point d'entree principal de SpeakToFR (PySide6)."""
+import logging
 import os
 import sys
 import threading
@@ -21,20 +22,23 @@ from PySide6.QtCore import Qt, QUrl, QSharedMemory
 from PySide6.QtGui import QIcon, QPainter, QColor, QPixmap, QDesktopServices
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from codex_tts.core.logging_setup import setup_logging
 from codex_tts.core.state import STATE
-from codex_tts.ui.prefs import load_window_prefs
 from codex_tts.services.watcher import clipboard_loop
 from codex_tts.services.hotkeys import hotkey_loop, stop_hotkey_loop
 from codex_tts.playback.control import stop_playback
 
 try:
     import winreg
-except Exception:
+except ImportError:
     winreg = None
+
+log = logging.getLogger("codex_tts.main")
 
 
 def main():
-    print("[CodexTTS] Demarre. Surveille le presse-papiers (Fluent/PySide6).")
+    setup_logging()
+    log.info("SpeakToFR demarre")
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -69,7 +73,7 @@ def main():
         signal.signal(signal.SIGINT, lambda *_: shutdown())
     except Exception:
         pass
-    STATE.root = app
+    STATE.ui.root = app
 
     clipboard_loop(app)
 
@@ -123,8 +127,8 @@ def main():
                         winreg.DeleteValue(key, "SpeakToFR")
                     except FileNotFoundError:
                         pass
-        except Exception:
-            pass
+        except OSError:
+            log.exception("Modification du demarrage automatique impossible")
 
     def _set_hotkey_enabled(enabled: bool) -> None:
         nonlocal hotkey_thread, hotkey_enabled
@@ -143,8 +147,10 @@ def main():
             help_path = Path(sys.argv[0]).resolve().parent / "help.html"
             if help_path.exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(help_path)))
+            else:
+                log.warning("Aide introuvable: %s", help_path)
         except Exception:
-            pass
+            log.exception("Ouverture de l'aide impossible")
 
     def _init_tray():
         nonlocal tray_icon, hotkey_thread, hotkey_enabled

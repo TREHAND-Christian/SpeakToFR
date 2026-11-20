@@ -1,74 +1,44 @@
-"""Fonctions de controle du moteur TTS (start/stop/pause/voix)."""
+"""Controle du moteur TTS (stop/pause/reprise, voix, vitesse)."""
+import logging
 import threading
 
 from ..core.state import STATE
 from ..playback.control import restart_current_sentence
-from ..text.sentences import split_sentences, split_sentences_with_positions
+
+log = logging.getLogger(__name__)
 
 
-def _current_voice():
-    if not STATE.voices:
-        return None
-    return STATE.voices[STATE.current_voice_index % len(STATE.voices)]
-
-
-def _join_worker(timeout: float = 1.0):
-    t = STATE.current_thread
-    if not t or not t.is_alive():
-        return
-    # Eviter de se joindre soi-meme
-    if t is threading.current_thread():
+def join_worker(timeout: float = 1.0) -> None:
+    """Attend la fin du thread de lecture (sauf si on est dedans)."""
+    t = STATE.playback.current_thread
+    if not t or not t.is_alive() or t is threading.current_thread():
         return
     try:
         t.join(timeout=timeout)
-    except Exception:
+    except RuntimeError:
         pass
     if not t.is_alive():
-        STATE.current_thread = None
-
-
-def tts_stop():
-    v = _current_voice()
-    if v:
-        eng = STATE.engine_for(v)
-        if eng:
-            try:
-                eng.stop()
-            except Exception:
-                pass
-    STATE.stop_requested = True
-    STATE.pause_requested = False
-    STATE.paused = False
-    _join_worker()
+        STATE.playback.current_thread = None
 
 
 def tts_pause():
-    v = _current_voice()
-    if not v:
-        return
-    eng = STATE.engine_for(v)
+    eng = STATE.current_engine()
     if not eng:
         return
-    STATE.pause_requested = True
-    STATE.stop_requested = False
-    STATE.paused = True
-    try:
-        # Coupe la phrase en cours; la reprise se fera au debut de la phrase
-        eng.stop()
-    except Exception:
-        pass
+    pb = STATE.playback
+    pb.pause_requested = True
+    pb.stop_requested = False
+    pb.paused = True
+    # Coupe la phrase en cours; la reprise se fera au debut de la phrase
+    eng.stop()
 
 
 def tts_resume():
-    if not STATE.paused:
+    pb = STATE.playback
+    if not pb.paused:
         return
-    
-    STATE.paused = False
-    STATE.pause_requested = False
-    STATE.stop_requested = False
-    
-    # La logique de reprise est maintenant plus fiable en relancant la lecture
-    # sur la phrase courante, similaire a un changement de voix.
+    pb.clear_flags()
+    # Reprise = relance sur la phrase courante, comme un changement de voix.
     restart_current_sentence(stop_existing=True, adjust_layout=False, debounce_ms=0)
 
 
@@ -79,17 +49,17 @@ def set_voice_by_index(index: int):
     STATE.current_voice_index = index
     STATE.current_voice_desc = STATE.voices[index]["desc"]
 
-    selector = getattr(STATE, "voice_selector", None)
+    selector = STATE.ui.voice_selector
     if selector is not None:
         try:
             selector.setCurrentText(STATE.current_voice_desc)
-        except Exception:
-            STATE.voice_selector = None
+        except RuntimeError:  # widget Qt deja detruit
+            STATE.ui.voice_selector = None
 
 
 def get_speed_multiplier() -> float:
     try:
-        val = float(getattr(STATE, "speed_value", 1.0))
-    except Exception:
+        val = float(STATE.speed_value)
+    except (TypeError, ValueError):
         val = 1.0
     return max(0.0, min(2.0, val))

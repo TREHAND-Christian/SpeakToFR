@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from codex_tts.core.config import TAG
 from codex_tts.services.clipboard import get_clipboard_text, set_clipboard_text
-from codex_tts.ui.ui import speak_with_ui
+from codex_tts.ui.ui_main import speak_with_ui
+
+log = logging.getLogger(__name__)
 
 
 def clipboard_loop(app: QApplication) -> None:
@@ -39,16 +42,16 @@ def clipboard_loop(app: QApplication) -> None:
                     if isinstance(obj, dict) and obj.get("type") == "html" and obj.get("html"):
                         text = obj.get("html") or ""
                         source_url = obj.get("url")
-                except Exception:
-                    pass
+                except ValueError:
+                    log.warning("Payload JSON du presse-papiers invalide, texte brut utilise")
 
             # Nettoie le clipboard pour éviter boucles
             try:
                 set_clipboard_text("")
             except Exception:
-                pass
+                log.exception("Nettoyage du presse-papiers impossible")
 
-            print("[CodexTTS] watcher: start_playback poste sur le thread Qt")
+            log.debug("watcher: lecture demandee")
             QTimer.singleShot(
                 0,
                 lambda: speak_with_ui(
@@ -63,8 +66,8 @@ def clipboard_loop(app: QApplication) -> None:
         except KeyboardInterrupt:
             QTimer.singleShot(0, app.quit)
         except Exception:
-            # silencieux: le watcher ne doit jamais faire planter l'app
-            pass
+            # le watcher ne doit jamais faire planter l'app
+            log.exception("Erreur dans la surveillance du presse-papiers")
 
     timer = QTimer()
     timer.setInterval(150)

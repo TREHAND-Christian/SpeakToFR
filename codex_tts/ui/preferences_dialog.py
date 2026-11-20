@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .prefs import load_window_prefs, save_window_prefs
+from ..core.prefs import load_prefs, save_prefs
 
 
 class PreferencesDialog(QDialog):
@@ -18,7 +18,7 @@ class PreferencesDialog(QDialog):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setMinimumWidth(420)
 
-        prefs = load_window_prefs() or {}
+        prefs = load_prefs() or {}
 
         self.auto_detect_french = QCheckBox("Ne pas retraduire un texte déjà en français")
         self.auto_detect_french.setChecked(bool(prefs.get("auto_detect_french", True)))
@@ -55,7 +55,7 @@ class PreferencesDialog(QDialog):
         layout.addWidget(buttons)
 
     def accept(self):
-        save_window_prefs(
+        save_prefs(
             {
                 "auto_detect_french": self.auto_detect_french.isChecked(),
                 "force_translate": self.force_translate.isChecked(),

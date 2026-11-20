@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 
 try:
     from langdetect import detect
@@ -12,6 +13,8 @@ try:
     from googletrans import Translator  # type: ignore
 except Exception:  # pragma: no cover
     Translator = None
+
+log = logging.getLogger(__name__)
 
 
 @functools.lru_cache(maxsize=1)
@@ -49,7 +52,7 @@ def translate_to_fr(text: str) -> str:
         return text
     tr = _translator()
     if tr is None:
-        print("[CodexTTS] translate_to_fr: aucun backend de traduction disponible (Translator None)")
+        log.warning("translate_to_fr: aucun backend de traduction disponible")
         return text
     try:
         parts = _chunk(text, max_len=2000)
@@ -65,9 +68,9 @@ def translate_to_fr(text: str) -> str:
             except Exception as e:
                 err_count += 1
                 if err_count <= 3:
-                    print(f"[CodexTTS] translate_to_fr: erreur sur un chunk, fallback chunk brut ({e})")
+                    log.warning("translate_to_fr: erreur sur un chunk, texte brut conserve (%s)", e)
                 out.append(chunk)
         return "".join(out)
     except Exception as e:
-        print(f"[CodexTTS] translate_to_fr: erreur globale, retour texte original ({e})")
+        log.warning("translate_to_fr: erreur globale, texte original conserve (%s)", e)
         return text

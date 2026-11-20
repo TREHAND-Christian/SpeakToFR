@@ -1,5 +1,4 @@
-"""Configuration globale de CodexTTS (touches, tag, chemins AHK)."""
-import ctypes
+"""Configuration globale de SpeakToFR (touches, tag, chemins AHK)."""
 import win32con
 
 TAG = "[CODEX_TTS]"

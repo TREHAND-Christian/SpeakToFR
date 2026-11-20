@@ -1,84 +1,43 @@
-import html
-import json
-import threading
+import logging
 import re
-from html.parser import HTMLParser
-from pathlib import Path
+import threading
+from html import unescape
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Slot, QMetaObject, Q_ARG, QSize
-from PySide6.QtGui import QTextCursor, QTextCharFormat, QColor, QPalette, QGuiApplication, QPixmap, QPainter, QIcon
+from PySide6.QtCore import Qt, QTimer, Slot, QSize
+from PySide6.QtGui import QColor, QGuiApplication, QPalette, QTextCursor
 from PySide6.QtWidgets import (
-    QApplication,
-    QWidget,
-    QVBoxLayout,
+    QComboBox,
     QHBoxLayout,
-    QGridLayout,
-    QTextEdit,
     QLabel,
     QPushButton,
-    QComboBox,
+    QSizePolicy,
     QSlider,
     QStyle,
-    QMessageBox,
-    QSizePolicy,
-    QScrollArea,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
+from ..core.prefs import load_prefs, save_prefs
 from ..core.state import STATE
-from .prefs import load_window_prefs, save_window_prefs
+from ..core.tts_engine import set_voice_by_index, tts_pause, tts_resume
 from ..playback.control import restart_current_sentence, stop_playback
-from ..services.clipboard import set_clipboard_text
-from ..services.translator import translate_to_fr
-from ..core.tts_engine import (
-    tts_stop,
-    tts_pause,
-    tts_resume,
-    set_voice_by_index,
-    get_speed_multiplier,
-)
+from ..text.positions import subtract_ranges
+from .css_colors import contrast_background
+from .widgets import make_drag_handle, make_mini_icon, make_options_icon
 
-_VOICE_PREFS_APPLIED = False
-_HTML_WINDOW = None
+log = logging.getLogger(__name__)
+
 MODE_COMPLET = "complet"
 MODE_OPTIONS = "options"
 MODE_MINI = "mini"
 
 
-class DragHandleLabel(QLabel):
-    """Petite poignee permettant de deplacer la fenetre via drag."""
-
-    def __init__(self, window: QWidget, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._win = window
-        self._drag_offset = None
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._win is not None:
-            try:
-                self._drag_offset = event.globalPosition().toPoint() - self._win.frameGeometry().topLeft()
-            except Exception:
-                self._drag_offset = None
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_offset is not None and event.buttons() & Qt.LeftButton and self._win is not None:
-            try:
-                self._win.move(event.globalPosition().toPoint() - self._drag_offset)
-            except Exception:
-                pass
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_offset = None
-        super().mouseReleaseEvent(event)
-
-
 class ControlWindow(QWidget):
     def __init__(self, text_len: int, highlight_callback, cleanup_callback=None):
         super().__init__()
-        self.setWindowTitle("CodexTTS")
+        self.setWindowTitle("SpeakToFR")
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
         self._highlight_callback = highlight_callback
         self._cleanup_callback = cleanup_callback
@@ -86,8 +45,9 @@ class ControlWindow(QWidget):
         self._last_saved_pos = None
         self._mode = MODE_COMPLET
         self._pre_view_has_content = False
-        self._show_icon_preview = False
         self._last_html = None
+        self.highlight_allowed = True
+        self.pre_exclude_ranges: list[tuple[int, int]] = []
 
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(12, 2, 12, 4)
@@ -106,31 +66,10 @@ class ControlWindow(QWidget):
         self.down_icon = style.standardIcon(QStyle.SP_ArrowDown)
         # Icônes mode (actions cibles)
         self.mode_to_full_icon = style.standardIcon(QStyle.SP_TitleBarMaxButton)
-        self.mode_to_options_icon = self._make_options_icon(QSize(16, 16))
-        self.mode_to_mini_icon = self._make_mini_icon(QSize(16, 16))
+        self.mode_to_options_icon = make_options_icon(QSize(16, 16))
+        self.mode_to_mini_icon = make_mini_icon(QSize(16, 16))
 
-        # Poignee visuelle (points) en debut de ligne
-        handle_pix = QPixmap(12, 28)
-        handle_pix.fill(Qt.transparent)
-        painter = QPainter(handle_pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor("#7a7a7a"))
-        painter.setPen(Qt.NoPen)
-        spacing_x = 4
-        spacing_y = 2
-        for row in range(5):
-            y = spacing_y + row * (4 + spacing_y)
-            for col in range(3):
-                x = 1 + col * spacing_x
-                painter.drawEllipse(x, y, 4, 4)
-        painter.end()
-
-        handle_label = DragHandleLabel(self, self)
-        handle_label.setPixmap(handle_pix)
-        handle_label.setFixedSize(QSize(28, 28))
-        handle_label.setAlignment(Qt.AlignCenter)
-        handle_label.setCursor(Qt.OpenHandCursor)
-        btn_row.addWidget(handle_label)
+        btn_row.addWidget(make_drag_handle(self, self))
 
         self.btn_pause = QPushButton("Pause", self)
         self.btn_pause.setIcon(self.pause_icon)
@@ -277,116 +216,6 @@ class ControlWindow(QWidget):
         self._main_layout.addWidget(self.text_edit)
         self._main_layout.addWidget(self.pre_view)
 
-        # Apercu temporaire des icones standards (sous la ligne d'etat)
-        self.icon_preview = QWidget(self)
-        self.icon_preview.setObjectName("icon_preview")
-        self.icon_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        preview_layout = QGridLayout(self.icon_preview)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.setSpacing(6)
-        icon_names = [
-            "SP_TitleBarMenuButton",
-            "SP_TitleBarMinButton",
-            "SP_TitleBarMaxButton",
-            "SP_TitleBarCloseButton",
-            "SP_TitleBarNormalButton",
-            "SP_TitleBarShadeButton",
-            "SP_TitleBarUnshadeButton",
-            "SP_TitleBarContextHelpButton",
-            "SP_DockWidgetCloseButton",
-            "SP_MessageBoxInformation",
-            "SP_MessageBoxWarning",
-            "SP_MessageBoxCritical",
-            "SP_MessageBoxQuestion",
-            "SP_DesktopIcon",
-            "SP_TrashIcon",
-            "SP_ComputerIcon",
-            "SP_DriveFDIcon",
-            "SP_DriveHDIcon",
-            "SP_DriveCDIcon",
-            "SP_DriveDVDIcon",
-            "SP_DriveNetIcon",
-            "SP_DirOpenIcon",
-            "SP_DirClosedIcon",
-            "SP_DirLinkIcon",
-            "SP_DirLinkOpenIcon",
-            "SP_DirHomeIcon",
-            "SP_DirIcon",
-            "SP_FileIcon",
-            "SP_FileLinkIcon",
-            "SP_FileDialogStart",
-            "SP_FileDialogEnd",
-            "SP_FileDialogToParent",
-            "SP_FileDialogNewFolder",
-            "SP_FileDialogDetailedView",
-            "SP_FileDialogInfoView",
-            "SP_FileDialogContentsView",
-            "SP_FileDialogListView",
-            "SP_FileDialogBack",
-            "SP_ToolBarHorizontalExtensionButton",
-            "SP_ToolBarVerticalExtensionButton",
-            "SP_DialogOkButton",
-            "SP_DialogCancelButton",
-            "SP_DialogHelpButton",
-            "SP_DialogOpenButton",
-            "SP_DialogSaveButton",
-            "SP_DialogCloseButton",
-            "SP_DialogApplyButton",
-            "SP_DialogResetButton",
-            "SP_DialogDiscardButton",
-            "SP_DialogYesButton",
-            "SP_DialogNoButton",
-            "SP_DialogYesToAllButton",
-            "SP_DialogNoToAllButton",
-            "SP_DialogAbortButton",
-            "SP_DialogRetryButton",
-            "SP_DialogIgnoreButton",
-            "SP_RestoreDefaultsButton",
-            "SP_LineEditClearButton",
-            "SP_ArrowUp",
-            "SP_ArrowDown",
-            "SP_ArrowLeft",
-            "SP_ArrowRight",
-            "SP_ArrowBack",
-            "SP_ArrowForward",
-            "SP_BrowserReload",
-            "SP_BrowserStop",
-            "SP_MediaPlay",
-            "SP_MediaPause",
-            "SP_MediaStop",
-            "SP_MediaSkipForward",
-            "SP_MediaSkipBackward",
-            "SP_MediaSeekForward",
-            "SP_MediaSeekBackward",
-            "SP_MediaVolume",
-            "SP_MediaVolumeMuted",
-            "SP_CommandLink",
-        ]
-        icon_defs = [(name, getattr(QStyle, name)) for name in icon_names if hasattr(QStyle, name)]
-        cols = 5
-        for idx, (name, sp) in enumerate(icon_defs):
-            row = idx // cols
-            col = idx % cols
-            cell = QWidget(self.icon_preview)
-            cell_layout = QHBoxLayout(cell)
-            cell_layout.setContentsMargins(0, 0, 0, 0)
-            cell_layout.setSpacing(4)
-            icon_label = QLabel(cell)
-            icon_label.setPixmap(style.standardIcon(sp).pixmap(20, 20))
-            text_label = QLabel(name, cell)
-            text_label.setStyleSheet("color: #555; font-size: 10px;")
-            cell_layout.addWidget(icon_label)
-            cell_layout.addWidget(text_label)
-            preview_layout.addWidget(cell, row, col)
-        self.icon_preview_scroll = QScrollArea(self)
-        self.icon_preview_scroll.setWidgetResizable(True)
-        self.icon_preview_scroll.setFrameShape(QScrollArea.NoFrame)
-        self.icon_preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.icon_preview_scroll.setWidget(self.icon_preview)
-        self._main_layout.addWidget(self.icon_preview_scroll)
-
-
-
         self.info_widget = QWidget(self)
         info_row = QHBoxLayout(self.info_widget)
         info_row.setContentsMargins(0, 0, 0, 0)
@@ -402,9 +231,9 @@ class ControlWindow(QWidget):
         self.voice_combo.currentTextChanged.connect(self.on_voice_changed)
         self.speed_slider.valueChanged.connect(self.on_speed_changed)
         self.btn_first.clicked.connect(lambda: self._jump_to_sentence(0))
-        self.btn_prev.clicked.connect(lambda: self._jump_to_sentence(STATE.sentence_index - 1))
-        self.btn_next.clicked.connect(lambda: self._jump_to_sentence(STATE.sentence_index + 1))
-        self.btn_last.clicked.connect(lambda: self._jump_to_sentence(len(STATE.sentence_parts) - 1))
+        self.btn_prev.clicked.connect(lambda: self._jump_to_sentence(STATE.playback.sentence_index - 1))
+        self.btn_next.clicked.connect(lambda: self._jump_to_sentence(STATE.playback.sentence_index + 1))
+        self.btn_last.clicked.connect(lambda: self._jump_to_sentence(len(STATE.playback.sentence_parts) - 1))
         self.btn_close_ui.clicked.connect(self._handle_collapse_button)
         self.btn_expand_options.clicked.connect(self._handle_option_button)
 
@@ -413,6 +242,9 @@ class ControlWindow(QWidget):
         # Etat mode sauvegarde
         self._apply_saved_mode()
 
+    def set_highlight_callback(self, callback):
+        self._highlight_callback = callback
+
     @Slot(int)
     def apply_highlight_slot(self, index: int):
         if self._highlight_callback:
@@ -420,7 +252,7 @@ class ControlWindow(QWidget):
 
     def on_pause_clicked(self):
         try:
-            if not STATE.paused:
+            if not STATE.playback.paused:
                 self.btn_pause.setText("Reprendre")
                 self.btn_pause.setIcon(self.play_icon)
                 tts_pause()
@@ -428,10 +260,10 @@ class ControlWindow(QWidget):
                 self.btn_pause.setText("Pause")
                 self.btn_pause.setIcon(self.pause_icon)
                 tts_resume()
-            if getattr(self, "_mode", MODE_COMPLET) == MODE_MINI:
+            if self._mode == MODE_MINI:
                 self.btn_pause.setText("")
-        except Exception as e:
-            print(f"[CodexTTS] Pause/Resume error: {e}")
+        except Exception:
+            log.exception("Pause/reprise impossible")
 
     def on_stop_clicked(self):
         threading.Thread(target=stop_playback, daemon=True).start()
@@ -447,7 +279,7 @@ class ControlWindow(QWidget):
                 if v["desc"] == text:
                     set_voice_by_index(i)
                     restart_current_sentence(stop_existing=True, adjust_layout=False)
-                    save_window_prefs({"voice": text})
+                    save_prefs({"voice": text})
                     break
         except Exception:
             pass
@@ -457,7 +289,7 @@ class ControlWindow(QWidget):
         STATE.speed_value = val
         self.speed_label.setText(f"Vitesse {val:.1f}")
         restart_current_sentence(debounce_ms=200, stop_existing=True, adjust_layout=False)
-        save_window_prefs({"speed": val})
+        save_prefs({"speed": val})
 
     def schedule_adjust(self):
         QTimer.singleShot(0, self._adjust_height_to_text)
@@ -486,7 +318,7 @@ class ControlWindow(QWidget):
         info_h = self.info_widget.sizeHint().height()
         fixed_parts_h = top_h + info_h + tm + bm + spacing * 2
 
-        compact_mode = getattr(self, "_mode", MODE_COMPLET) in (MODE_OPTIONS, MODE_MINI)
+        compact_mode = self._mode in (MODE_OPTIONS, MODE_MINI)
         if compact_mode:
             # Mode compact : seulement la barre du haut
             final_win_h = min(max_win_h, top_h + tm + bm)
@@ -495,13 +327,9 @@ class ControlWindow(QWidget):
             final_win_h = min(ideal_win_h, max_win_h)
 
             avail_text_h = max(0, final_win_h - fixed_parts_h)
-            if self.icon_preview_scroll.isVisible() and not self.text_edit.isVisible():
-                self.icon_preview_scroll.setMinimumHeight(avail_text_h)
-                self.icon_preview_scroll.setMaximumHeight(avail_text_h)
-            else:
-                text_final_h = min(text_needed_h, avail_text_h if avail_text_h > 0 else text_needed_h)
-                self.text_edit.setMinimumHeight(text_final_h)
-                self.text_edit.setMaximumHeight(avail_text_h if avail_text_h > 0 else text_final_h)
+            text_final_h = min(text_needed_h, avail_text_h if avail_text_h > 0 else text_needed_h)
+            self.text_edit.setMinimumHeight(text_final_h)
+            self.text_edit.setMaximumHeight(avail_text_h if avail_text_h > 0 else text_final_h)
         self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         self.setMaximumHeight(max_h)
@@ -523,40 +351,6 @@ class ControlWindow(QWidget):
                 self.move(x, y)
         except Exception:
             pass
-
-    def _make_options_icon(self, size: QSize) -> QIcon:
-        """Icone mode options: fenetre basse (30%) avec barre superieure fine."""
-        w = max(8, size.width())
-        h = max(8, size.height())
-        pix = QPixmap(w, h)
-        pix.fill(Qt.transparent)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        pen = painter.pen()
-        pen.setColor(QColor("#000000"))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        body_h = max(3, int(h * 0.3))
-        body_y = 0
-        painter.drawRect(0, body_y, w - 1, body_h - 1)
-        bar_h = 2
-        painter.fillRect(0, body_y, w, bar_h, QColor("#000000"))
-        painter.end()
-        return QIcon(pix)
-
-    def _make_mini_icon(self, size: QSize) -> QIcon:
-        """Icone mode mini: petite barre en haut, 50% largeur, alignee a gauche."""
-        w = max(8, size.width())
-        h = max(8, size.height())
-        pix = QPixmap(w, h)
-        pix.fill(Qt.transparent)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        bar_w = max(3, int(w * 0.5))
-        bar_h = 2
-        painter.fillRect(0, 0, bar_w, bar_h, QColor("#000000"))
-        painter.end()
-        return QIcon(pix)
 
     def _normalize_mode(self, mode: str) -> str:
         val = str(mode or "").strip().lower()
@@ -581,169 +375,19 @@ class ControlWindow(QWidget):
             self.top_bar.layout().setSpacing(1)
 
     def _apply_text_background_contrast(self) -> None:
-        html_bg = self._detect_html_background_color(self._last_html)
-        if html_bg is not None:
-            base_color = html_bg
-        else:
-            html_text = self._detect_html_text_color(self._last_html)
-            text_color = html_text or self._detect_rendered_text_color() or self._detect_default_text_color()
-            luminance = (0.299 * text_color.red()) + (0.587 * text_color.green()) + (0.114 * text_color.blue())
-            base_color = QColor("#ffffff") if luminance < 128 else QColor("#000000")
         palette = self.text_edit.palette()
-        palette.setColor(QPalette.Base, base_color)
+        palette.setColor(QPalette.Base, contrast_background(self.text_edit, self._last_html))
         self.text_edit.setPalette(palette)
 
-    def _detect_default_text_color(self) -> QColor:
-        doc = self.text_edit.document()
-        text = doc.toPlainText()
-        idx = 0
-        while idx < len(text) and text[idx].isspace():
-            idx += 1
-        cursor = QTextCursor(doc)
-        if idx < len(text):
-            cursor.setPosition(idx)
-        fmt = cursor.charFormat()
-        brush = fmt.foreground()
-        if brush.style() != Qt.NoBrush:
-            color = brush.color()
-            if color.isValid():
-                return color
-        return self.text_edit.palette().color(QPalette.Text)
-
-    def _detect_rendered_text_color(self) -> Optional[QColor]:
-        try:
-            viewport = self.text_edit.viewport()
-            pixmap = viewport.grab()
-            img = pixmap.toImage()
-            w = img.width()
-            h = img.height()
-            if w <= 0 or h <= 0:
-                return None
-
-            def color_at(x: int, y: int) -> QColor:
-                return QColor(img.pixel(x, y))
-
-            bg_samples = [
-                color_at(2, 2),
-                color_at(w - 3, 2),
-                color_at(2, h - 3),
-                color_at(w - 3, h - 3),
-            ]
-            bg = QColor(
-                sum(c.red() for c in bg_samples) // len(bg_samples),
-                sum(c.green() for c in bg_samples) // len(bg_samples),
-                sum(c.blue() for c in bg_samples) // len(bg_samples),
-            )
-
-            step = max(2, min(w, h) // 80)
-            hist = {}
-
-            def color_key(c: QColor) -> int:
-                return ((c.red() // 8) << 10) | ((c.green() // 8) << 5) | (c.blue() // 8)
-
-            def color_dist(a: QColor, b: QColor) -> int:
-                return abs(a.red() - b.red()) + abs(a.green() - b.green()) + abs(a.blue() - b.blue())
-
-            for y in range(0, h, step):
-                for x in range(0, w, step):
-                    c = color_at(x, y)
-                    if color_dist(c, bg) < 12:
-                        continue
-                    key = color_key(c)
-                    hist[key] = hist.get(key, 0) + 1
-
-            if not hist:
-                return None
-
-            best_key = max(hist, key=hist.get)
-            r = ((best_key >> 10) & 0x1F) * 8 + 4
-            g = ((best_key >> 5) & 0x1F) * 8 + 4
-            b = (best_key & 0x1F) * 8 + 4
-            return QColor(r, g, b)
-        except Exception:
-            return None
-
-    def _detect_html_background_color(self, html_code: Optional[str]) -> Optional[QColor]:
-        if not html_code:
-            return None
-        try:
-            m = re.search(r"background-color\s*:\s*([^;\"']+)", html_code, flags=re.IGNORECASE)
-            if m:
-                c = self._parse_css_color(m.group(1))
-                if c is not None:
-                    return c
-            m = re.search(r"bgcolor\s*=\s*[\"']?([^\"'>\s]+)", html_code, flags=re.IGNORECASE)
-            if m:
-                c = self._parse_css_color(m.group(1))
-                if c is not None:
-                    return c
-        except Exception:
-            return None
-        return None
-
-    def _detect_html_text_color(self, html_code: Optional[str]) -> Optional[QColor]:
-        if not html_code:
-            return None
-        try:
-            for m in re.finditer(r"color\s*:\s*([^;\"']+)", html_code, flags=re.IGNORECASE):
-                prefix = html_code[max(0, m.start() - 12):m.start()].lower()
-                if "background-" in prefix:
-                    continue
-                c = self._parse_css_color(m.group(1))
-                if c is not None:
-                    return c
-            m = re.search(r"color\s*=\s*[\"']?([^\"'>\s]+)", html_code, flags=re.IGNORECASE)
-            if m:
-                c = self._parse_css_color(m.group(1))
-                if c is not None:
-                    return c
-        except Exception:
-            return None
-        return None
-
-    def _parse_css_color(self, value: str) -> Optional[QColor]:
-        if not value:
-            return None
-        s = value.strip().lower()
-        if s.startswith("#"):
-            hexv = s[1:]
-            if len(hexv) == 3:
-                try:
-                    r = int(hexv[0] * 2, 16)
-                    g = int(hexv[1] * 2, 16)
-                    b = int(hexv[2] * 2, 16)
-                    return QColor(r, g, b)
-                except Exception:
-                    return None
-            if len(hexv) == 6:
-                try:
-                    r = int(hexv[0:2], 16)
-                    g = int(hexv[2:4], 16)
-                    b = int(hexv[4:6], 16)
-                    return QColor(r, g, b)
-                except Exception:
-                    return None
-            return None
-        m = re.match(r"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", s)
-        if m:
-            try:
-                r = int(m.group(1))
-                g = int(m.group(2))
-                b = int(m.group(3))
-                return QColor(r, g, b)
-            except Exception:
-                return None
-        return None
-
     def _handle_collapse_button(self):
-        mode = getattr(self, "_mode", MODE_COMPLET)
+        mode = self._mode
         if mode == MODE_COMPLET:
             self._set_mode(MODE_OPTIONS)
         else:
             self._set_mode(MODE_COMPLET)
 
     def _handle_option_button(self):
-        mode = getattr(self, "_mode", MODE_COMPLET)
+        mode = self._mode
         if mode in (MODE_COMPLET, MODE_OPTIONS):
             self._set_mode(MODE_MINI)
         else:
@@ -776,17 +420,12 @@ class ControlWindow(QWidget):
 
         show_options = is_complet or is_options
         show_text = is_complet
-        show_preview = show_text and self._show_icon_preview
 
         for w in (self.voice_combo, self.speed_box, self.nav_container):
             w.setVisible(show_options)
 
-        self.icon_preview_scroll.setVisible(show_preview)
-        self.text_edit.setVisible(show_text and not show_preview)
-        if show_text and self._pre_view_has_content and not show_preview:
-            self.pre_view.setVisible(True)
-        else:
-            self.pre_view.setVisible(False)
+        self.text_edit.setVisible(show_text)
+        self.pre_view.setVisible(show_text and self._pre_view_has_content)
         self.info_widget.setVisible(show_text)
 
         self._set_layout_density(compact=not is_complet)
@@ -795,28 +434,28 @@ class ControlWindow(QWidget):
             self.btn_pause.setText("")
             self.btn_stop.setText("")
         else:
-            self.btn_pause.setText("Pause" if not STATE.paused else "Reprendre")
+            self.btn_pause.setText("Pause" if not STATE.playback.paused else "Reprendre")
             self.btn_stop.setText("Fermer")
 
         if persist:
             try:
-                save_window_prefs({"mode": normalized})
+                save_prefs({"mode": normalized})
             except Exception:
                 pass
 
         self.schedule_adjust()
 
     def _jump_to_sentence(self, idx: int):
-        if not STATE.sentence_parts:
+        if not STATE.playback.sentence_parts:
             return
-        max_idx = len(STATE.sentence_parts) - 1
+        max_idx = len(STATE.playback.sentence_parts) - 1
         idx = max(0, min(idx, max_idx))
 
         # Saute les phrases marquees <pre> dans les deux sens.
-        skip_flags = getattr(STATE, "sentence_skip", None) or []
+        skip_flags = STATE.playback.sentence_skip
         if skip_flags and 0 <= idx <= max_idx and idx < len(skip_flags):
             if skip_flags[idx]:
-                if idx <= STATE.sentence_index:
+                if idx <= STATE.playback.sentence_index:
                     # Remonter
                     while idx > 0 and idx < len(skip_flags) and skip_flags[idx]:
                         idx -= 1
@@ -825,7 +464,7 @@ class ControlWindow(QWidget):
                     while idx < max_idx and idx < len(skip_flags) and skip_flags[idx]:
                         idx += 1
 
-        STATE.sentence_index = idx
+        STATE.playback.sentence_index = idx
         restart_current_sentence(stop_existing=True, adjust_layout=False)
 
     def set_voice_items(self, values: list[str], current: str):
@@ -866,7 +505,7 @@ class ControlWindow(QWidget):
                     cleaned = []
                     for b in blocks:
                         b_txt = re.sub(r"<[^>]+>", "", b)   # retire tags internes si besoin
-                        b_txt = html.unescape(b_txt)
+                        b_txt = unescape(b_txt)
                         cleaned.append(b_txt.strip("\n"))
 
                     sep = "\n\n" + ("-" * 40) + "\n\n"
@@ -886,7 +525,7 @@ class ControlWindow(QWidget):
             self.pre_view.setVisible(False)
             self._pre_view_has_content = False
 
-        if getattr(self, "_mode", MODE_COMPLET) != MODE_COMPLET:
+        if self._mode != MODE_COMPLET:
             self.pre_view.setVisible(False)
 
         QTimer.singleShot(0, self._apply_text_background_contrast)
@@ -894,20 +533,15 @@ class ControlWindow(QWidget):
 
     def apply_highlight(self, start: int, end: int):
         """Surligne la phrase en cours sans la sélectionner. Les blocs <pre> ne sont pas surlignés."""
-        if getattr(self, "_highlight_allowed", True) is False:
+        if not self.highlight_allowed:
             return
         extra_selections = []
         if start < end:
             # Convertit les index "référence" -> index du texte réellement rendu par Qt
-            try:
-                mp = getattr(STATE, "ref_to_doc_map", None)
-                if isinstance(mp, list) and end < len(mp):
-                    start_m = mp[start] if 0 <= start < len(mp) else start
-                    end_m = mp[end] if 0 <= end < len(mp) else end
-                    if start_m is not None and end_m is not None:
-                        start, end = int(start_m), int(end_m)
-            except Exception:
-                pass
+            mp = STATE.playback.ref_to_doc_map
+            if isinstance(mp, list) and end < len(mp):
+                start = mp[start] if 0 <= start < len(mp) else start
+                end = mp[end] if 0 <= end < len(mp) else end
 
             # Clamp sur le texte réellement affiché
             doc_display = self.text_edit.document().toPlainText()
@@ -915,26 +549,11 @@ class ControlWindow(QWidget):
             start = max(0, min(start, doc_len))
             end = max(start, min(end, doc_len))
 
-            excludes = getattr(self, "_pre_exclude_ranges", []) or []
-
-            def subtract_ranges(seg_start: int, seg_end: int, ranges):
-                parts = [(seg_start, seg_end)]
-                for a, b in ranges:
-                    new_parts = []
-                    for x, y in parts:
-                        if b <= x or a >= y:
-                            new_parts.append((x, y))
-                        else:
-                            if x < a:
-                                new_parts.append((x, a))
-                            if b < y:
-                                new_parts.append((b, y))
-                    parts = new_parts
-                return [(x, y) for x, y in parts if x < y]
+            excludes = self.pre_exclude_ranges
 
             segments = subtract_ranges(start, end, excludes)
 
-            utf16_map = getattr(STATE, "doc_utf16_map", None)
+            utf16_map = STATE.playback.doc_utf16_map
 
             for s, e in segments:
                 if isinstance(utf16_map, list) and e < len(utf16_map):
@@ -979,12 +598,12 @@ class ControlWindow(QWidget):
         try:
             pos = (self.x(), self.y())
             self._last_saved_pos = pos
-            save_window_prefs({"x": pos[0], "y": pos[1]})
+            save_prefs({"x": pos[0], "y": pos[1]})
         except Exception:
             pass
 
     def _apply_saved_position(self):
-        data = load_window_prefs()
+        data = load_prefs()
         if data and "x" in data and "y" in data:
             self._pos_from_prefs = True
             self._last_saved_pos = (int(data["x"]), int(data["y"]))
@@ -996,7 +615,7 @@ class ControlWindow(QWidget):
             self._pos_from_prefs = False
 
     def _apply_saved_mode(self):
-        data = load_window_prefs()
+        data = load_prefs()
         if not data:
             self._set_mode(MODE_COMPLET, persist=False)
             return

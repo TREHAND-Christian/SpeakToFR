@@ -1,1 +1,1 @@
-"""Services CodexTTS."""
+"""Services SpeakToFR."""

@@ -1,148 +1,84 @@
-"""Etat global du moteur TTS et des fenetres (OneCore uniquement)."""
-import asyncio
-import html
-import os
-import tempfile
+"""Etat partage de l'application, regroupe par responsabilite.
+
+STATE reste un singleton (les threads TTS et l'UI Qt s'y retrouvent), mais ses
+attributs sont tous declares ici :
+- STATE.playback : etat de la lecture en cours (drapeaux, phrases, offsets) ;
+- STATE.ui       : references vers les objets Qt utilises hors de l'UI ;
+- STATE.voices / current_voice_* / speed_value : choix de voix et vitesse.
+"""
+from __future__ import annotations
+
 import threading
-import time
-import wave
-import winsound
-from array import array
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
-try:
-    from winsdk.windows.media.speechsynthesis import SpeechSynthesizer
-    from winsdk.windows.storage.streams import DataReader, InputStreamOptions
-
-    HAS_ONECORE = True
-except Exception:
-    HAS_ONECORE = False
+from .onecore import OneCoreEngine
 
 
-class OneCoreEngine:
-    def __init__(self):
-        if not HAS_ONECORE:
-            raise RuntimeError("OneCore not available")
-        self.synth = SpeechSynthesizer()
-        try:
-            self.default_rate = float(self.synth.options.speaking_rate)
-        except Exception:
-            self.default_rate = None
-        self.voices = list(SpeechSynthesizer.all_voices)
-        self.stop_flag = False
+@dataclass
+class PlaybackState:
+    """Etat de la lecture en cours."""
 
-    def list_voices(self):
-        return [{"kind": "OneCore", "token": v, "desc": v.display_name} for v in self.voices]
+    paused: bool = False
+    pause_requested: bool = False
+    stop_requested: bool = False
 
-    def _scale_rate(self, rate: float) -> float:
-        """Mappe directement le slider 0.0-2.0 vers OneCore, avec clamp de securite."""
-        try:
-            r = float(rate)
-        except Exception:
-            r = 1.0
-        return max(0.1, min(2.0, r))
+    sentence_index: int = 0
+    sentence_parts: list[str] = field(default_factory=list)  # phrases affichees
+    sentence_parts_tts: list[str] = field(default_factory=list)  # phrases lues
+    sentence_positions: list[tuple[int, int]] = field(default_factory=list)
+    sentence_skip: list[bool] = field(default_factory=list)  # phrases dans un <pre>
+    pre_ranges: list[tuple[int, int]] = field(default_factory=list)
 
-    def _ssml(self, text: str, rate: float) -> str:
-        safe_text = html.escape(text)
-        pct = max(10, min(int(rate * 100), 300))
-        return (
-            "<speak version='1.0' xml:lang='fr-FR'>"
-            f"<prosody rate='{pct}%'>{safe_text}</prosody>"
-            "</speak>"
-        )
+    # Dernier texte lu (pour relire apres changement de voix/vitesse)
+    last_text: str = ""
+    last_display_html: Optional[str] = None
 
-    async def _synth_to_wav(self, token, text: str, rate: float) -> str:
-        self.synth.voice = token
-        scaled = self._scale_rate(rate)
-        base = self.default_rate if self.default_rate is not None else 1.0
-        try:
-            if abs(scaled - 1.0) < 1e-3:
-                self.synth.options.speaking_rate = base
-            else:
-                self.synth.options.speaking_rate = base * scaled
-        except Exception:
-            pass
-        # Utilise la synthese texte standard (evite le double effet SSML + speaking_rate)
-        stream = await self.synth.synthesize_text_to_stream_async(text)
-        size = stream.size
-        reader = DataReader(stream)
-        reader.input_stream_options = InputStreamOptions.READ_AHEAD
-        await reader.load_async(size)
-        buf = array("B", [0]) * size
-        reader.read_bytes(buf)
-        data = buf.tobytes()
-        f = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        f.write(data)
-        f.close()
-        return f.name
+    current_thread: Optional[threading.Thread] = None
+    # Identifiant de lecture courant (evite le clignotement lors des relances)
+    playback_token: int = 0
+    # Timer de relance (debounce) pour les changements de vitesse/voix
+    restart_timer: Any = None
 
-    def speak_blocking(self, token, text: str, rate: float = 1.0):
-        self.stop_flag = False
-        loop = asyncio.new_event_loop()
-        wav = None
-        try:
-            wav = loop.run_until_complete(self._synth_to_wav(token, text, rate))
-        finally:
-            try:
-                loop.close()
-            except Exception:
-                pass
-        if not wav:
-            return
+    # Correspondance des offsets texte de reference -> texte rendu par Qt
+    ref_to_doc_map: Optional[list[int]] = None
+    doc_utf16_map: Optional[list[int]] = None
 
-        # Lecture asynchrone pour pouvoir interrompre
-        duration = 0.0
-        try:
-            with wave.open(wav, "rb") as wf:
-                frames = wf.getnframes()
-                rate = wf.getframerate() or 1
-                duration = frames / float(rate)
-        except Exception:
-            duration = 0.0
+    def clear_flags(self) -> None:
+        self.paused = False
+        self.pause_requested = False
+        self.stop_requested = False
 
-        try:
-            winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            waited = 0.0
-            step = 0.05
-            max_wait = duration + 0.5 if duration > 0 else 5.0
-            while waited < max_wait and not self.stop_flag:
-                time.sleep(step)
-                waited += step
-        finally:
-            try:
-                winsound.PlaySound(None, 0)
-            except Exception:
-                pass
-            try:
-                os.remove(wav)
-            except Exception:
-                pass
+    def request_stop(self) -> None:
+        self.stop_requested = True
+        self.pause_requested = False
+        self.paused = False
 
-    def stop(self):
-        self.stop_flag = True
-        try:
-            winsound.PlaySound(None, 0)
-        except Exception:
-            pass
 
-    def pause(self):
-        self.stop()
+@dataclass
+class UiRefs:
+    """References vers des objets Qt partages."""
 
-    def resume(self):
-        pass
+    root: Any = None  # QApplication
+    ctrl_window: Any = None
+    voice_selector: Any = None
+    no_selection_box: Any = None
+
+    def clear_window(self) -> None:
+        self.ctrl_window = None
+        self.voice_selector = None
 
 
 class TTSState:
     def __init__(self):
-        self.sapi = None
         try:
-            self.onecore = OneCoreEngine()
+            self.onecore: Optional[OneCoreEngine] = OneCoreEngine()
         except Exception:
             self.onecore = None
 
-        self.voices = self.onecore.list_voices() if self.onecore else []
+        self.voices: list[dict] = self.onecore.list_voices() if self.onecore else []
 
-        # Voix par defaut : on choisit "Paul" si present, sinon la premiere voix disponible
+        # Voix par defaut : "Paul" si present, sinon la premiere voix disponible
         self.current_voice_index = 0
         for i, v in enumerate(self.voices):
             if "paul" in (v.get("desc") or "").lower():
@@ -150,47 +86,25 @@ class TTSState:
                 break
         self.current_voice_desc = self.voices[self.current_voice_index]["desc"] if self.voices else "?"
 
-        # UI references (Qt widgets)
-        self.ctrl_window: Any = None
-        self.voice_label: Any = None
-        self.trans_frame: Any = None
-        self.trans_label: Any = None
-        self.trans_info: Any = None
-        self.pause_button: Any = None
-        self.voice_selector: Any = None
-        self.root: Any = None
-
-        # Etat lecture
-        self.paused: bool = False
-        self.pause_requested: bool = False
-        self.stop_requested: bool = False
-        self.sentence_index: int = 0
-        self.sentence_parts: list[str] = []
-        self.sentence_positions: list[tuple[int, int]] = []
-
-        # Fenetre de choix de voix
-        self.voice_win: Any = None
-
-        # Dernier texte lu (pour relire apres changement de voix)
-        self.last_text: str = ""
-        self.last_display_html: Any = None
-
-        # Thread courant
-        self.current_thread: Optional[threading.Thread] = None
-
         # Vitesse de lecture (multiplicateur)
         self.speed_value: float = 1.0
 
-        # Identifiant de lecture courant (evite le clignotement lors des relances)
-        self.playback_token: int = 0
-
-        # Timer de relance (debounce) pour les changements de vitesse/voix
-        self.restart_timer = None
+        self.playback = PlaybackState()
+        self.ui = UiRefs()
 
     def engine_for(self, voice_entry):
         if voice_entry.get("kind") == "OneCore":
             return self.onecore
         return None
+
+    def current_voice(self) -> Optional[dict]:
+        if not self.voices:
+            return None
+        return self.voices[self.current_voice_index % len(self.voices)]
+
+    def current_engine(self):
+        voice = self.current_voice()
+        return self.engine_for(voice) if voice else None
 
 
 STATE = TTSState()

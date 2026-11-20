@@ -181,17 +181,22 @@ les titres et les logs.
 6. Limites connues de l'application actuelle
 -------------------------------------------
 
-- Plusieurs noms internes historiques CodexTTS restent visibles dans le code.
-- L'etat global est tres large et couple l'UI, la lecture et les services.
-- Certains traitements HTML sont complexes et difficiles a tester.
 - googletrans utilise un backend non officiel et peut echouer selon le reseau
   ou les changements du service distant.
-- Les logs sont principalement des print console, peu utiles en executable
-  fenetre.
-- Des fichiers anciens ou de debug restent presents.
 - Le raccourci n'est pas configurable dans l'interface.
-- La preference window_prefs.json est stockee dans le dossier applicatif, ce
-  qui peut poser probleme selon les droits d'installation.
+- Le chemin AutoHotkey (core/config.py) pointe encore vers
+  C:\Program Files\CodexTTS ; le fallback Ctrl+C simule fonctionne sans.
+- STATE reste un singleton global (voir core/state.py), mais ses attributs sont
+  regroupes (STATE.playback, STATE.ui) et tous declares.
+
+Fait lors du refactoring :
+- preferences deplacees dans %APPDATA%\SpeakToFR\prefs.json (migration auto de
+  l'ancien window_prefs.json) ;
+- logs dans %APPDATA%\SpeakToFR\speaktofr.log (fichier tournant) ;
+- html_utils, ui_main et window decoupes en modules plus petits ;
+- fichiers morts supprimes ; tests automatises dans tests/ (pytest).
+
+Tests : pip install -r requirements-dev.txt puis python -m pytest tests
 
 
 7. Ameliorations proposees pour une version ulterieure

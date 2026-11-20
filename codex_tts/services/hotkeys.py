@@ -1,4 +1,6 @@
 """Gestion du raccourci global et du vrai Ctrl+C via AutoHotkey."""
+import json
+import logging
 import time
 import subprocess
 import ctypes
@@ -16,6 +18,7 @@ RegisterHotKey = user32.RegisterHotKey
 UnregisterHotKey = user32.UnregisterHotKey
 
 HOTKEY_THREAD_ID = None
+log = logging.getLogger(__name__)
 
 
 def stop_hotkey_loop():
@@ -26,7 +29,7 @@ def stop_hotkey_loop():
     try:
         user32.PostThreadMessageW(tid, win32con.WM_QUIT, 0, 0)
     except Exception:
-        pass
+        log.exception("Arret du thread hotkey impossible")
 
 
 def release_hotkey_modifiers():
@@ -71,24 +74,24 @@ def hotkey_loop():
     global HOTKEY_THREAD_ID
     ok = RegisterHotKey(None, HOTKEY_ID, MOD_CTRL_ALT, VK_ENTER)
     if not ok:
-        print("[CodexTTS] ERREUR : impossible d'enregistrer Ctrl+Alt+Entrée.")
+        log.error("Impossible d'enregistrer Ctrl+Alt+Entree (deja utilise ?)")
         try:
             user32.MessageBoxW(
                 None,
                 "Impossible d'activer le raccourci global Ctrl+Alt+Entrée.\n"
                 "Verifiez qu'aucune autre application ne l'utilise et que vous avez les droits necessaires.",
-                "CodexTTS",
+                "SpeakToFR",
                 win32con.MB_ICONERROR | win32con.MB_OK,
             )
         except Exception:
-            pass
+            log.exception("Affichage de l'erreur de raccourci impossible")
         return
 
     try:
         HOTKEY_THREAD_ID = kernel32.GetCurrentThreadId()
     except Exception:
         HOTKEY_THREAD_ID = None
-    print("[CodexTTS] Raccourci actif : Ctrl + Alt + Entree")
+    log.info("Raccourci actif : Ctrl + Alt + Entree")
 
     msg = wintypes.MSG()
 
@@ -97,11 +100,11 @@ def hotkey_loop():
         if ret == 0:
             break
         if ret == -1:
-            print("[CodexTTS] ERREUR : GetMessageW a echoue.")
+            log.error("GetMessageW a echoue")
             break
 
         if msg.message == win32con.WM_HOTKEY and msg.wParam == HOTKEY_ID:
-            print("[CodexTTS] Hotkey detecte, copie le texte.")
+            log.debug("Hotkey detecte, copie du texte")
 
             before = get_clipboard_text()
 
@@ -125,7 +128,6 @@ def hotkey_loop():
 
             if new.strip():
                 if payload.get("type") == "html" and payload.get("html"):
-                    import json
                     tagged = f"{TAG}\n" + json.dumps(
                         {"type": "html", "html": payload.get("html"), "url": payload.get("url")},
                         ensure_ascii=False,
@@ -137,9 +139,9 @@ def hotkey_loop():
 
             ok = set_clipboard_text(tagged)
             if ok:
-                print("[CodexTTS] Texte balise dans le presse-papiers.")
+                log.debug("Texte balise dans le presse-papiers")
             else:
-                print("[CodexTTS] Impossible d'ecrire dans le presse-papiers (verrouille ?).")
+                log.warning("Impossible d'ecrire dans le presse-papiers (verrouille ?)")
 
         user32.TranslateMessage(ctypes.byref(msg))
         user32.DispatchMessageW(ctypes.byref(msg))
