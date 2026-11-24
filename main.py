@@ -25,6 +25,9 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from codex_tts.core.logging_setup import setup_logging
 from codex_tts.core.state import STATE
 from codex_tts.services.watcher import clipboard_loop
+from codex_tts.services.claude_desktop import ClaudeDesktopReader
+from codex_tts.core.prefs import load_prefs, save_prefs
+from codex_tts.ui.ui_main import speak_with_ui
 from codex_tts.services.hotkeys import hotkey_loop, stop_hotkey_loop
 from codex_tts.playback.control import stop_playback
 
@@ -52,6 +55,10 @@ def main():
 
     def shutdown():
         try:
+            app._claude_desktop_reader.set_enabled(False)
+        except Exception:
+            pass
+        try:
             stop_playback(clear_clipboard=True)
         except Exception:
             pass
@@ -76,6 +83,10 @@ def main():
     STATE.ui.root = app
 
     clipboard_loop(app)
+
+    claude_reader = ClaudeDesktopReader(app)
+    claude_reader.callback = lambda text: speak_with_ui(app, text=text, reuse_ui=True, translate_text=True)
+    setattr(app, "_claude_desktop_reader", claude_reader)
 
     def _make_status_icon(color: str) -> QIcon:
         size = 16
@@ -170,6 +181,19 @@ def main():
         autostart_action.setCheckable(True)
         autostart_action.setChecked(_get_autostart_enabled())
         autostart_action.triggered.connect(lambda checked: _set_autostart_enabled(checked))
+
+        claude_action = menu.addAction("Lecture auto Claude Desktop")
+        claude_action.setCheckable(True)
+        claude_enabled = bool((load_prefs() or {}).get("claude_auto_read", True))
+        claude_action.setChecked(claude_enabled)
+        claude_action.setEnabled(claude_reader.available)
+
+        def _toggle_claude(checked: bool) -> None:
+            claude_reader.set_enabled(checked)
+            save_prefs({"claude_auto_read": checked})
+
+        claude_action.triggered.connect(_toggle_claude)
+        claude_reader.set_enabled(claude_enabled)
 
         menu.addSeparator()
         help_action = menu.addAction("Aide")
