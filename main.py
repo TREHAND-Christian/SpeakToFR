@@ -36,6 +36,11 @@ from codex_tts.ui.ui_main import speak_with_ui
 from codex_tts.services.hotkeys import hotkey_loop, stop_hotkey_loop
 from codex_tts.playback.control import stop_playback
 
+from codex_tts.ui.web_text_view import init_web_engine
+
+# Qt WebEngine (rendu fidele de la fenetre texte) doit etre initialise avant QApplication
+init_web_engine()
+
 try:
     import winreg
 except ImportError:
@@ -44,7 +49,60 @@ except ImportError:
 log = logging.getLogger("codex_tts.main")
 
 
+def _selftest_web(out_path: str) -> int:
+    """Diagnostic : affiche une page test dans la vue Chromium, ecrit le resultat dans out_path."""
+    import json as _json
+    from PySide6.QtCore import QTimer
+
+    from codex_tts.text.html_faithful import web_document
+    from codex_tts.ui.web_text_view import create_web_view, web_available
+
+    app = QApplication(sys.argv)
+
+    def write(msg: str) -> None:
+        Path(out_path).write_text(msg, encoding="utf-8")
+
+    if not web_available():
+        write("ERREUR: Qt WebEngine indisponible")
+        return 2
+    view = create_web_view()
+    view.resize(500, 200)
+    view.move(-3000, -3000)
+    view.show()
+    state = {}
+
+    def done(res):
+        view.grab().save(str(Path(out_path).with_suffix(".png")))
+        write(f"OK hauteur={state.get('h')} surligne={res!r}")
+        app.quit()
+
+    def on_size(h, _w):
+        if "h" in state:
+            return
+        state["h"] = h
+        view.highlight([[0, 4, "Test"]])
+        QTimer.singleShot(
+            500,
+            lambda: view._run(
+                "JSON.stringify(Array.from(CSS.highlights.get('stfr') || []).map(function(r){return r.toString();}))",
+                done,
+            ),
+        )
+
+    view.content_size_changed.connect(on_size)
+    doc = web_document('<div style="background: linear-gradient(#c33, #33c); border-radius: 10px; color: white; '
+                       'padding: 20px">Test <b>SpeakToFR</b> rendu fidèle</div>')
+    view.show_html(doc, None, "rgb(255, 255, 255)")
+    QTimer.singleShot(20000, lambda: (write("ERREUR: delai depasse"), app.quit()))
+    app.exec()
+    return 0
+
+
 def main():
+    if "--selftest-web" in sys.argv:
+        idx = sys.argv.index("--selftest-web")
+        out = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else str(Path.home() / "speaktofr_selftest.txt")
+        return _selftest_web(out)
     setup_logging()
     log.info("SpeakToFR demarre")
 

@@ -33,6 +33,7 @@ class PlaybackState:
     # Dernier texte lu (pour relire apres changement de voix/vitesse)
     last_text: str = ""
     last_display_html: Optional[str] = None
+    last_source_url: Optional[str] = None  # page d'origine de la selection (liens/images relatifs)
 
     # Lecture demandee et pas terminee (traduction, lecture ou pause) : pilote la barre flottante
     busy: bool = False

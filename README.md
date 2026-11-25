@@ -16,6 +16,7 @@ Un texte dans une autre langue est d'abord traduit en français. Ensuite, il est
 - **Traduction** vers le français avec googletrans. Un texte déjà en français n'est pas retraduit, sauf si tu forces la traduction. Les morceaux d'une sélection HTML (liens, gras, listes…) partent ensemble, en une requête par bloc d'environ 4 500 caractères. Les traductions sont gardées en cache, donc relire un texte déjà traduit est instantané.
 - **Lecture adaptée** : les blocs de code ne sont pas lus. Les URL, chemins Windows et sigles sont préparés pour être bien prononcés.
 - **Barre flottante**, **fenêtre Options** et **fenêtre texte**, sur le modèle de l'extension VS Code [CodexAudio](https://github.com/TREHAND-Christian/CodexAudio). La fenêtre texte surligne la phrase en cours de lecture.
+- **Rendu fidèle de la sélection** : la fenêtre texte affiche une sélection web comme sur la page (images, fonds, dégradés, coins arrondis, couleurs), avec le moteur Chromium de Qt WebEngine. Les cartes d'un fil d'actualités sont remises côte à côte. Les scripts de la page ne s'exécutent pas et un clic sur un lien l'ouvre dans ton navigateur. Le rendu simplifié (texte seul) reste disponible dans les Options.
 - **Volume et muet propres à SpeakToFR** : le volume général de Windows ne change pas.
 
 ## Barre flottante
@@ -44,7 +45,7 @@ La fenêtre s'ouvre avec la roue de la barre ou par un clic sur l'icône **S2FR*
 
 - **Principal** : mettre le service en pause (coupe le raccourci et la surveillance de Claude Desktop), muet, lecture automatique des réponses de Claude Desktop, lecture des réponses intermédiaires, voix, vitesse (50 à 200 %), volume (0 à 100 %), *Tester la voix*.
 - **Interface** : afficher la barre, l'afficher au démarrage, la griser hors de Claude Desktop, l'activer ailleurs si du texte est sélectionné, lancer SpeakToFR au démarrage de Windows.
-- **Fenêtre texte** : l'afficher, ne pas retraduire un texte déjà en français, toujours traduire, enregistrer les fichiers HTML de debug.
+- **Fenêtre texte** : l'afficher, rendu fidèle à la page ou simplifié, ne pas retraduire un texte déjà en français, toujours traduire, enregistrer les fichiers HTML de debug.
 
 Le menu de l'icône **S2FR**, à côté de l'horloge, reprend l'essentiel de ces réglages : service actif, lecture auto de Claude Desktop, barre flottante, démarrage avec Windows, Options, Aide et Quitter.
 
@@ -78,7 +79,7 @@ Il faut aussi PyInstaller (`pip install pyinstaller`) et [Inno Setup 6](https://
 
 | Résultat | Emplacement |
 |---|---|
-| Exécutable autonome | `dist\SpeakToFR.exe` |
+| Application (dossier) | `dist\SpeakToFR\` (`SpeakToFR.exe` + `_internal`) |
 | Installeur | `Output\SetupSpeakToFR.exe` |
 
 L'installeur installe SpeakToFR dans `Program Files (x86)\SpeakToFR`, ce qui demande les droits administrateur. Il ferme d'abord une version déjà lancée et propose le démarrage automatique avec Windows.
@@ -103,6 +104,7 @@ Principales clés de `prefs.json` :
 | `show_text` | Fenêtre texte affichée |
 | `bar_x`, `bar_y`, `bar_start`, `bar_dim_unfocused`, `bar_selection_mode` | Position de la barre, affichage au démarrage, grisage hors de Claude Desktop, activation sur sélection |
 | `x`, `y` | Position de la fenêtre texte |
+| `text_render_faithful` | Rendu fidèle de la fenêtre texte (Chromium) ; `false` = rendu simplifié |
 | `auto_detect_french`, `force_translate`, `debug_html` | Traduction et debug |
 
 ## Tests

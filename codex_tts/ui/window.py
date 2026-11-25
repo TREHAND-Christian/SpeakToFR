@@ -23,9 +23,12 @@ from ..core.prefs import load_prefs, save_prefs
 from ..core.state import STATE
 from ..core.tts_engine import set_voice_by_index, tts_pause, tts_resume
 from ..playback.control import restart_current_sentence, stop_playback
+from ..text.html_faithful import body_of, page_colors, web_document
 from ..text.positions import subtract_ranges
+from ..text.web_align import segments_for_web, visible_prefix
 from .bus import BUS
 from .css_colors import contrast_background
+from .web_text_view import create_web_view, faithful_render_enabled
 from .widgets import make_drag_handle, make_mini_icon, make_options_icon
 
 log = logging.getLogger(__name__)
@@ -47,6 +50,12 @@ class ControlWindow(QWidget):
         self._mode = MODE_COMPLET
         self._pre_view_has_content = False
         self._last_html = None
+        # Rendu fidele : vue Chromium affichee a la place du QTextEdit (qui garde le texte des phrases)
+        self._web = None
+        self._web_active = False
+        self._web_h = 0
+        self._prefix_src: Optional[str] = None
+        self._prefix: list[int] = []
         self.highlight_allowed = True
         self.pre_exclude_ranges: list[tuple[int, int]] = []
 
@@ -316,15 +325,20 @@ class ControlWindow(QWidget):
         max_win_h = int(max_h * 0.9)
 
         # Hauteur du texte rendu
-        doc = self.text_edit.document()
-        layout = doc.documentLayout()
-        doc_h = layout.documentSize().height() if layout else doc.size().height()
-        if doc_h <= 0:
-            doc_h = 80
+        if self._web_active:
+            area = self._web
+            text_needed_h = int((self._web_h or 160) + 4)
+        else:
+            area = self.text_edit
+            doc = self.text_edit.document()
+            layout = doc.documentLayout()
+            doc_h = layout.documentSize().height() if layout else doc.size().height()
+            if doc_h <= 0:
+                doc_h = 80
 
-        m = self.text_edit.contentsMargins()
-        frame = self.text_edit.frameWidth() * 2
-        text_needed_h = int(doc_h + m.top() + m.bottom() + frame)
+            m = self.text_edit.contentsMargins()
+            frame = self.text_edit.frameWidth() * 2
+            text_needed_h = int(doc_h + m.top() + m.bottom() + frame)
 
         # Hauteur fixe des barres + marges layout
         lm, tm, rm, bm = self._main_layout.getContentsMargins()
@@ -343,8 +357,8 @@ class ControlWindow(QWidget):
 
             avail_text_h = max(0, final_win_h - fixed_parts_h)
             text_final_h = min(text_needed_h, avail_text_h if avail_text_h > 0 else text_needed_h)
-            self.text_edit.setMinimumHeight(text_final_h)
-            self.text_edit.setMaximumHeight(avail_text_h if avail_text_h > 0 else text_final_h)
+            area.setMinimumHeight(text_final_h)
+            area.setMaximumHeight(avail_text_h if avail_text_h > 0 else text_final_h)
         self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
         self.setMaximumHeight(max_h)
@@ -439,7 +453,9 @@ class ControlWindow(QWidget):
         for w in (self.voice_combo, self.speed_box, self.nav_container):
             w.setVisible(show_options)
 
-        self.text_edit.setVisible(show_text)
+        self.text_edit.setVisible(show_text and not self._web_active)
+        if self._web is not None:
+            self._web.setVisible(show_text and self._web_active)
         self.pre_view.setVisible(show_text and self._pre_view_has_content)
         self.info_widget.setVisible(show_text)
 
@@ -503,7 +519,37 @@ class ControlWindow(QWidget):
     def set_info(self, text: str):
         self.info_label.setText(text)
 
-    def set_content(self, text: str, html: Optional[str] = None, original_html: Optional[str] = None):
+    def _use_web(self, want: bool) -> bool:
+        """Active ou non la vue Chromium (rendu fidele) ; renvoie l'etat effectif."""
+        if want and self._web is None:
+            try:
+                self._web = create_web_view(self)
+                self._web.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                self._web.content_size_changed.connect(self._on_web_size)
+                self._main_layout.insertWidget(self._main_layout.indexOf(self.text_edit) + 1, self._web)
+            except Exception:
+                log.exception("Rendu fidele indisponible, rendu simplifie")
+                self._web = None
+        self._web_active = bool(want and self._web is not None)
+        show_text = self._mode == MODE_COMPLET
+        self.text_edit.setVisible(show_text and not self._web_active)
+        if self._web is not None:
+            self._web.setVisible(show_text and self._web_active)
+        return self._web_active
+
+    def _on_web_size(self, height: int, _width: int) -> None:
+        if height > 0 and height != self._web_h:
+            self._web_h = height
+            self.schedule_adjust()
+
+    def set_content(
+        self,
+        text: str,
+        html: Optional[str] = None,
+        original_html: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        web = self._use_web(faithful_render_enabled())
         if html and html.strip():
             h = html.strip()
             # IMPORTANT: si le HTML contient déjà <html>, on NE re-wrappe PAS
@@ -515,6 +561,18 @@ class ControlWindow(QWidget):
         else:
             self.text_edit.setPlainText(text)
             self._last_html = None
+
+        if web:
+            # Chromium affiche la page ; le QTextEdit (cache) sert au decoupage en phrases
+            doc_html = web_document(self._last_html, "" if self._last_html else text, base_url)
+            bg_css, _ = page_colors(body_of(self._last_html or ""))
+            if self._web.show_html(doc_html, base_url, bg_css):
+                self._web_h = 0
+            self.pre_view.clear()
+            self.pre_view.setVisible(False)
+            self._pre_view_has_content = False
+            self.schedule_adjust()
+            return
 
         # Affichage des blocs <pre> dans un panneau séparé (visuel uniquement)
         try:
@@ -572,6 +630,14 @@ class ControlWindow(QWidget):
 
             segments = subtract_ranges(start, end, excludes)
 
+            if self._web_active:
+                # Phrase reperee dans la page par ses caracteres visibles (voir text.web_align)
+                if self._prefix_src != doc_display:
+                    self._prefix_src = doc_display
+                    self._prefix = visible_prefix(doc_display)
+                self._web.highlight(segments_for_web(doc_display, self._prefix, segments))
+                return
+
             utf16_map = STATE.playback.doc_utf16_map
 
             for s, e in segments:
@@ -598,14 +664,21 @@ class ControlWindow(QWidget):
                 self.text_edit.setTextCursor(visible_cursor)
                 self.text_edit.ensureCursorVisible()
 
+        if self._web_active:
+            self._web.clear_highlight()
+            return
         self.text_edit.setExtraSelections(extra_selections)
 
     def clear_highlight(self):
         self.text_edit.setExtraSelections([])
+        if self._web is not None:
+            self._web.clear_highlight()
 
     def shrink_text_area(self):
         """Reduit la zone texte."""
         self.text_edit.setMinimumHeight(120)
+        if self._web is not None:
+            self._web.setMinimumHeight(120)
         self._main_layout.invalidate()
 
     def closeEvent(self, event):

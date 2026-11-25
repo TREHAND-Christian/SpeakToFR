@@ -16,6 +16,8 @@ if (-not $python) {
 }
 
 Write-Host "== PyInstaller =="
+# Ancien exe unique (avant le passage en dossier)
+if (Test-Path ".\dist\SpeakToFR.exe") { Remove-Item ".\dist\SpeakToFR.exe" -Force }
 # "python -m PyInstaller" plutot que pyinstaller.exe : le lanceur du venv peut pointer vers un ancien dossier
 & $python -m PyInstaller --noconfirm ".\SpeakToFR.spec"
 if ($LASTEXITCODE -ne 0) {
@@ -36,5 +38,5 @@ if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup a echoue (code $LASTEXITCODE)."
 }
 
-Write-Host "OK: exe dans .\dist\SpeakToFR.exe"
+Write-Host "OK: application dans .\dist\SpeakToFR\ (SpeakToFR.exe + _internal)"
 Write-Host "OK: setup dans .\Output\SetupSpeakToFR.exe"

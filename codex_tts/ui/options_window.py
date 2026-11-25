@@ -24,6 +24,7 @@ from ..core.prefs import load_prefs, save_prefs
 from ..core.state import STATE
 from .bus import BUS
 from .icons import icon_png
+from .web_text_view import web_available
 
 log = logging.getLogger(__name__)
 
@@ -236,10 +237,15 @@ class OptionsWindow(QWidget):
         # --- Fenetre texte
         txt = _Group("Fenêtre texte")
         self.chk_show_text = QCheckBox("Afficher la fenêtre texte")
+        self.chk_faithful = QCheckBox("Rendu fidèle à la page (images, fonds, couleurs)")
+        self.chk_faithful.setToolTip(
+            "Coché : la sélection est affichée comme sur la page (moteur Chromium).\n"
+            "Décoché : rendu simplifié, texte seul. S'applique à la prochaine lecture."
+        )
         self.chk_no_retranslate = QCheckBox("Ne pas retraduire un texte déjà en français")
         self.chk_force = QCheckBox("Toujours traduire (forcer googletrans)")
         self.chk_debug = QCheckBox("Enregistrer les fichiers HTML de debug")
-        for w in (self.chk_show_text, self.chk_no_retranslate, self.chk_force, self.chk_debug):
+        for w in (self.chk_show_text, self.chk_faithful, self.chk_no_retranslate, self.chk_force, self.chk_debug):
             txt.add(w)
         root.addWidget(txt)
         root.addStretch(1)
@@ -308,6 +314,7 @@ class OptionsWindow(QWidget):
         self.chk_no_retranslate.toggled.connect(lambda v: save_prefs({"auto_detect_french": bool(v)}))
         self.chk_force.toggled.connect(lambda v: save_prefs({"force_translate": bool(v)}))
         self.chk_debug.toggled.connect(lambda v: save_prefs({"debug_html": bool(v)}))
+        self.chk_faithful.toggled.connect(lambda v: save_prefs({"text_render_faithful": bool(v)}))
 
     # ---------------------------------------------------------------- evenements
     def _on_voice(self, row: int) -> None:
@@ -333,7 +340,7 @@ class OptionsWindow(QWidget):
             self.chk_pause, self.chk_mute, self.chk_auto, self.chk_partial, self.voice_combo, self.speed_slider,
             self.volume_slider, self.chk_bar, self.chk_bar_start, self.chk_bar_dim, self.chk_selection,
             self.chk_autostart,
-            self.chk_show_text, self.chk_no_retranslate, self.chk_force, self.chk_debug,
+            self.chk_show_text, self.chk_faithful, self.chk_no_retranslate, self.chk_force, self.chk_debug,
         )
         for w in widgets:
             w.blockSignals(True)
@@ -379,6 +386,8 @@ class OptionsWindow(QWidget):
             self.chk_no_retranslate.setChecked(bool(prefs.get("auto_detect_french", True)))
             self.chk_force.setChecked(bool(prefs.get("force_translate", False)))
             self.chk_debug.setChecked(bool(prefs.get("debug_html", False)))
+            self.chk_faithful.setChecked(web_available() and bool(prefs.get("text_render_faithful", True)))
+            self.chk_faithful.setEnabled(web_available())
         finally:
             for w in widgets:
                 w.blockSignals(False)

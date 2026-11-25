@@ -19,6 +19,8 @@ from ..text.display import (
     sentences_from_document,
     tts_parts_for_positions,
 )
+from ..text.html_clean import clean_display_html
+from ..text.html_faithful import faithful_display_html
 from ..text.html_style import style_pre_blocks
 from ..text.html_text import (
     looks_like_html,
@@ -38,6 +40,7 @@ from ..text.tts_prep import (
     trim_space_before_punct,
 )
 from .alerts import NO_SELECTION_TEXT, notify_no_voice, show_no_selection_alert, speak_short_message
+from .web_text_view import faithful_render_enabled
 from .ctrl_window_factory import (
     apply_voice_speed_prefs_once,
     cleanup_ui,
@@ -84,7 +87,8 @@ def _show_placeholder(app: QApplication, text_len: int, reuse_ui: bool) -> None:
 def _align_with_qt_document(win, normalized_unmasked: str, pre_ranges, start_index: int) -> None:
     """Calcule les offsets du surlignage a partir du texte reellement rendu par Qt."""
     pb = STATE.playback
-    doc_plain = normalize_newlines(win.text_edit.document().toPlainText())
+    # Images (rendu fidele) : caractere objet de Qt remplace par un espace (meme longueur)
+    doc_plain = normalize_newlines(win.text_edit.document().toPlainText()).replace("\ufffc", " ")
     pb.ref_to_doc_map = build_ref_to_doc_map(normalized_unmasked, doc_plain)
     pb.doc_utf16_map = build_utf16_index_map(doc_plain)
 
@@ -160,7 +164,7 @@ def _start_playback(
         win = create_ctrl_window(len(fr_text), _highlight_sentence)
 
     win.set_info(f"Lecture ({len(normalized_unmasked)} caracteres)")
-    win.set_content(normalized_unmasked, html=html_for_display, original_html=display_html)
+    win.set_content(normalized_unmasked, html=html_for_display, original_html=display_html, base_url=pb.last_source_url)
     pb.last_display_html = html_for_display
     win.highlight_allowed = bool(allow_highlight)
     # Fenetre texte visible seulement si l'option est cochee (barre flottante sinon)
@@ -196,20 +200,22 @@ def _translate(
     display_html_override: Optional[str],
     source_url: Optional[str],
     use_fast_translation: bool,
+    faithful: bool = False,
 ) -> tuple[str, Optional[str], bool]:
     """Traduit le texte ; renvoie (texte_traduit, html_affiche, surlignage_autorise)."""
     allow_highlight = True
     display_html = display_html_override
 
     if display_html_override is None and html_fragment and not use_fast_translation:
-        # Traduit les text nodes et conserve la structure HTML
-        translated_plain, translated_html = translate_html_preserve_markup(html_fragment)
+        # Traduit les text nodes et conserve la structure HTML (et les images en rendu fidele)
+        translated_plain, translated_html = translate_html_preserve_markup(html_fragment, keep_images=faithful)
         translated = trim_space_before_punct(add_sentence_space(translated_plain))
         translated_html = add_sentence_space_html(translated_html)
-        translated_html = space_around_inline_code_links(translated_html)
+        if not faithful:
+            translated_html = space_around_inline_code_links(translated_html)
         display_html = style_pre_blocks(translated_html)
-        # Optionnel : inline des styles calcules (Chromium headless) pour un rendu fidele
-        if source_url:
+        # Optionnel : inline des styles calcules (Chromium headless) en rendu simplifie
+        if source_url and not faithful:
             try:
                 res = inline_html_with_computed_styles(source_url, display_html, remove_images=True)
                 if res.ok and res.html:
@@ -262,12 +268,21 @@ def speak_with_ui(
     if origin:
         pb.last_origin = origin
 
+    if display_html_override is None:
+        pb.last_source_url = source_url  # nouvelle lecture ; une relance garde la page d'origine
+    faithful = faithful_render_enabled()
+
     text = strip_html_comments(text)
     # Detecte si on dispose d'HTML et derive une version texte pour le TTS
     html_fragment = None
     if looks_like_html(text):
-        html_fragment = strip_empty_html_tags(space_around_inline_code_links(text))
-    base_text = strip_html_to_text(text) if html_fragment else text
+        if faithful:
+            # Rendu fidele (Chromium) : images, fonds et couleurs de la page conserves
+            html_fragment = faithful_display_html(text)
+        else:
+            # Rendu simplifie (QTextEdit) : medias, voiles et couleurs illisibles corriges
+            html_fragment = strip_empty_html_tags(space_around_inline_code_links(clean_display_html(text)))
+    base_text = strip_html_to_text(html_fragment) if html_fragment else text
     write_html_debug("before_translation", html_fragment or plain_to_html(base_text))
 
     prefs = load_prefs() or {}
@@ -293,7 +308,7 @@ def speak_with_ui(
             if translate_text:
                 log.debug("translate_and_dispatch: debut traduction")
                 translated, display_html, allow_highlight = _translate(
-                    base_text, html_fragment, display_html_override, source_url, use_fast_translation
+                    base_text, html_fragment, display_html_override, source_url, use_fast_translation, faithful
                 )
             else:
                 translated = base_text

@@ -15,8 +15,12 @@ CloseApplicationsFilter=SpeakToFR.exe
 AppMutex=SpeakToFR.Singleton
 
 [Files]
-Source: "dist\SpeakToFR.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\SpeakToFR\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "help.html"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; Ancienne version (exe unique) : les bibliotheques sont maintenant dans _internal
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Icons]
 Name: "{group}\SpeakToFR"; Filename: "{app}\SpeakToFR.exe"

@@ -67,7 +67,8 @@ class _HTMLTranslator(HTMLParser):
             translated = translate_many([text for _, text in self.pending])
         except Exception:
             return  # texte d'origine conserve
-        for (idx, _), text_fr in zip(self.pending, translated):
+        for (idx, original), text_fr in zip(self.pending, translated):
+            text_fr = _keep_edges(original, text_fr)
             self.tokens[idx] = ("data", text_fr, text_fr, True)
 
     def handle_comment(self, data):
@@ -78,6 +79,15 @@ class _HTMLTranslator(HTMLParser):
 
     def handle_charref(self, name):
         self.handle_data(f"&#{name};")
+
+
+def _keep_edges(original: str, translated: str) -> str:
+    """Remet les espaces de debut/fin du noeud d'origine (sinon "les <a>" devient "the<a>")."""
+    if not translated:
+        return original
+    lead = original[: len(original) - len(original.lstrip())]
+    trail = original[len(original.rstrip()):]
+    return lead + translated.strip() + trail
 
 
 def render_attrs(attrs):
@@ -92,12 +102,13 @@ def render_attrs(attrs):
     return " " + " ".join(parts)
 
 
-def translate_html_preserve_markup(html_fragment: str):
+def translate_html_preserve_markup(html_fragment: str, keep_images: bool = False):
     """Traduit les text nodes du fragment HTML et retourne (plain, html)."""
     if not html_fragment:
         return "", ""
-    # Supprime les <img> du HTML (évite pollution visuelle dans l'app)
-    html_fragment = re.sub(r"<img[^>]*>", " ", html_fragment, flags=re.IGNORECASE)
+    if not keep_images:
+        # Rendu simplifie : pas d'images (Qt les affiche en icone cassee)
+        html_fragment = re.sub(r"<img[^>]*>", " ", html_fragment, flags=re.IGNORECASE)
     html_fragment = strip_html_comments(html_fragment)
 
     # Fallback simple : si aucune balise, traduit comme du texte brut

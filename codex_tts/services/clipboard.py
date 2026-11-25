@@ -2,6 +2,7 @@
 
 Renvoie le fragment HTML brut s'il existe (CF_HTML), sinon le texte Unicode.
 """
+import re
 import time
 import win32clipboard
 import win32con
@@ -78,21 +79,17 @@ def _html_fragment_from_cf_html(data: str) -> str:
                 start_html = int(line.split(":", 1)[1].strip() or -1)
             except Exception:
                 pass
-    # 1) Priorité : offsets fragment
+    # 1) Priorité : commentaires Start/EndFragment (sans ambiguïté)
+    m = re.search(r"<!--\s*StartFragment\s*-->(.*)<!--\s*EndFragment\s*-->", data, re.S | re.I)
+    if m:
+        return m.group(1)
+    # 2) Offsets : comptés en OCTETS UTF-8 (pas en caractères : les accents décaleraient la coupe)
+    raw = data.encode("utf-8", errors="surrogatepass")
     if start_fragment >= 0 and end_fragment > start_fragment:
-        return data[start_fragment:end_fragment]
-    # 2) Fallback : offsets HTML complets
+        return raw[start_fragment:end_fragment].decode("utf-8", errors="ignore")
+    # 3) Fallback : offsets HTML complets
     if start_html >= 0:
-        return data[start_html:]
-    # 3) Fallback ultimate : commentaires Start/EndFragment
-    try:
-        import re
-
-        m = re.search(r"<!--StartFragment-->(.*)<!--EndFragment-->", data, re.S | re.I)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
+        return raw[start_html:].decode("utf-8", errors="ignore")
     return data
 
 

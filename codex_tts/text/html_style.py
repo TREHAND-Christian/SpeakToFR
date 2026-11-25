@@ -99,7 +99,8 @@ def style_pre_blocks(html_fragment: str) -> str:
     def _style_code(match):
         attrs = match.group(1) or ""
         if "style=" in attrs.lower():
-            return match.group(0).replace("style=", f'style="{code_style}', 1)
+            return re.sub(r"style\s*=\s*([\"'])", lambda m: f"style={m.group(1)}{code_style}", match.group(0), count=1,
+                          flags=re.IGNORECASE)
         sep = "" if attrs.strip().endswith("/") or not attrs.strip() else " "
         return f"<code{attrs}{sep}style=\"{code_style}\">"
 
