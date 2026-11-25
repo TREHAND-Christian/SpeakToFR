@@ -38,6 +38,8 @@ def restart_current_sentence(
 
     def relaunch():
         def worker():
+            # La fin de la lecture interrompue ne doit pas fermer l'interface ni remettre la barre a l'arret
+            pb.playback_token += 1
             # Stop immediat juste avant de relancer (evite les coupures multiples pendant un drag de slider)
             if stop_existing:
                 pb.stop_requested = True

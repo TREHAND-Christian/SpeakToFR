@@ -48,9 +48,11 @@ Cas d'usage secondaire :
 - L'application demarre sans fenetre principale permanente.
 - Une icone est affichee dans la zone de notification Windows.
 - Le menu de l'icone permet :
-  - d'activer ou desactiver le raccourci global ;
+  - de mettre le service en pause (raccourci + lecture auto Claude Desktop) ;
+  - d'activer ou desactiver la lecture auto de Claude Desktop ;
+  - d'afficher ou masquer la barre flottante ;
   - d'activer ou desactiver le demarrage automatique Windows ;
-  - d'ouvrir les preferences ;
+  - d'ouvrir les options (clic sur l'icone aussi) ;
   - d'ouvrir l'aide locale ;
   - de quitter l'application.
 - Une seule instance doit pouvoir tourner a la fois.
@@ -105,8 +107,38 @@ Cas d'usage secondaire :
 - La pause coupe la phrase en cours et la reprise relance depuis la phrase
   courante.
 
-3.7 Fenetre de controle
+3.7 Barre flottante et options (modele CodexAudio)
 
+- Une barre flottante, toujours au-dessus, reprend celle de CodexAudio :
+  lecture/pause, stop, muet, fenetre texte, options.
+- Bordure verte = service actif, rouge = service en pause.
+- La barre n'est normale que quand Claude Desktop est au premier plan ; elle
+  est grisee dans toute autre appli (dans VS Code, c'est la barre CodexAudio
+  qui est active). Elle reprend ses couleurs au survol et reste cliquable.
+  Option "Griser la barre..." (bar_dim_unfocused, actif par defaut).
+- Le bouton lecture bascule Lecture/Pause des qu'une lecture est demandee
+  (traduction comprise). Le bouton Stop est grise quand rien n'est en lecture.
+- Quand une conversation est ouverte ou changee dans Claude Desktop (titre du
+  document "Titre - Claude"), sa derniere reponse est chargee sans etre lue :
+  le prochain Play la lit. Sinon Play relit la derniere lecture.
+- Le bouton fenetre texte affiche/masque la fenetre texte ; hors lecture, elle
+  montre la derniere reponse chargee et reste ouverte en fin de lecture.
+- La barre se deplace en la glissant (boutons compris) ; sa position est
+  memorisee (bar_x / bar_y). Elle peut s'afficher au demarrage (bar_start).
+- La fenetre Options (theme sombre, comme le panneau CodexAudio) regroupe :
+  - Principal : pause du service, muet, lecture auto Claude Desktop, voix,
+    vitesse (50-200 %), volume (0-100 %), tester la voix ;
+  - Interface : barre flottante, barre au demarrage, demarrage Windows ;
+  - Fenetre texte : affichage pendant la lecture, ne pas retraduire le
+    francais, forcer la traduction, fichiers HTML de debug.
+- Le volume et le muet ne touchent que SpeakToFR (volume de session audio
+  Windows via waveOutSetVolume), pas le volume general.
+
+3.8 Fenetre texte
+
+- La fenetre texte n'apparait que si l'option "Afficher la fenetre texte" est
+  cochee (bouton fenetre de la barre) ; sinon la lecture se fait avec la barre
+  seule, sans voler le focus.
 - La fenetre est flottante, toujours au-dessus et de style compact.
 - Elle affiche le texte lu, avec surlignage de la phrase courante.
 - Elle fournit :
@@ -117,26 +149,24 @@ Cas d'usage secondaire :
   - aller a la premiere phrase ;
   - phrase precedente ;
   - phrase suivante ;
-  - derniere phrase ;
-  - changement de mode.
-- Les modes requis sont :
-  - complet : texte + controles ;
-  - options : controles sans zone texte ;
-  - mini : controles essentiels compacts.
-- La position de la fenetre et le mode choisi sont memorises.
+  - derniere phrase.
+- La position de la fenetre est memorisee.
 
-3.8 Preferences
+3.9 Preferences
 
 Les preferences sont stockees en JSON et doivent contenir au minimum :
 - voice : voix choisie ;
 - speed : vitesse de lecture ;
 - x / y : position de la fenetre ;
-- mode : complet, options ou mini ;
 - auto_detect_french : booleen ;
 - force_translate : booleen ;
-- debug_html : booleen.
+- debug_html : booleen ;
+- show_text : fenetre texte affichee pendant la lecture ;
+- bar_x / bar_y / bar_start : barre flottante ;
+- volume (0-100) / muted : son ;
+- claude_auto_read : lecture auto Claude Desktop.
 
-3.9 Aide et packaging
+3.10 Aide et packaging
 
 - Une page d'aide locale doit etre fournie.
 - Un script de build doit produire un executable avec PyInstaller.

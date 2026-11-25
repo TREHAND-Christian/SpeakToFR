@@ -34,6 +34,9 @@ class PlaybackState:
     last_text: str = ""
     last_display_html: Optional[str] = None
 
+    # Lecture demandee et pas terminee (traduction, lecture ou pause) : pilote la barre flottante
+    busy: bool = False
+
     current_thread: Optional[threading.Thread] = None
     # Identifiant de lecture courant (evite le clignotement lors des relances)
     playback_token: int = 0
@@ -53,6 +56,7 @@ class PlaybackState:
         self.stop_requested = True
         self.pause_requested = False
         self.paused = False
+        self.busy = False
 
 
 @dataclass

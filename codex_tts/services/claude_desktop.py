@@ -4,7 +4,9 @@ Principe :
 - un thread surveille la fenetre Claude Desktop (claude.exe) ;
 - quand la derniere reponse de Claude passe de "en cours" a "terminee"
   (la barre d'actions du message, avec "Lire a voix haute", apparait), son texte
-  est extrait et envoye a SpeakToFR via le signal `message_ready`.
+  est extrait et envoye a SpeakToFR (`callback`) ;
+- quand une conversation est ouverte ou changee (titre du document "Titre - Claude"),
+  sa derniere reponse est seulement chargee (`on_loaded`) : le prochain Play la lira.
 
 Test sans lecture (Claude Desktop ouvert) :
     python -m codex_tts.services.claude_desktop
@@ -193,6 +195,78 @@ def _scan(win) -> Optional[dict]:
     }
 
 
+def _conversation_title(win, max_depth: int = 12) -> str:
+    """Titre de la conversation affichee : nom du document web ("Titre - Claude")."""
+
+    def walk(ctrl, depth: int) -> str:
+        if depth > max_depth:
+            return ""
+        for c in ctrl.GetChildren():
+            try:
+                if c.ControlTypeName == "DocumentControl":
+                    name = (c.Name or "").strip()
+                    if name:
+                        return name
+                    continue
+                found = walk(c, depth + 1)
+                if found:
+                    return found
+            except Exception:
+                continue
+        return ""
+
+    try:
+        return walk(win, 0)
+    except Exception:
+        return ""
+
+
+class ResponseTracker:
+    """Decide a chaque passage s'il faut lire (nouvelle reponse) ou seulement charger la derniere reponse."""
+
+    def __init__(self) -> None:
+        self.pending = False      # reponse vue "en cours" : a lire quand elle sera terminee
+        self.prev_total = None    # nombre de messages au passage precedent
+        self.last_key = None      # derniere reponse lue ou chargee
+        self.conv = None          # titre de la conversation affichee
+
+    def reset(self) -> None:
+        """Fenetre ou liste des messages introuvable."""
+        self.pending, self.prev_total = False, None
+
+    def feed(self, info: dict, title: str) -> tuple[Optional[str], str]:
+        """Renvoie ("read", texte), ("load", texte) ou (None, "")."""
+        total = info.get("total")
+        if title != self.conv:
+            # Autre conversation : pas de detection par le nombre de messages, et une reponse
+            # "en cours" n'est gardee que pour un nouveau chat (son titre change apres la 1re reponse).
+            if not (total is not None and total <= 2):
+                self.pending = False
+            self.prev_total = None
+            self.conv = title
+        if info["name"].startswith(STREAMING_PREFIX):
+            self.pending = True
+            return None, ""
+        advanced = self.prev_total is not None and total is not None and 0 < total - self.prev_total <= 3
+        if total is not None:
+            self.prev_total = total
+        if not info["claude"]:
+            self.pending = False
+            return None, ""
+        if not info["complete"]:
+            self.pending = True
+            return None, ""
+        text = info["text"]
+        key = (total, text[:80])
+        if not text.strip() or key == self.last_key:
+            return None, ""
+        self.last_key = key
+        if self.pending or advanced:
+            self.pending = False
+            return "read", text
+        return "load", text
+
+
 def _read_last_claude_message(win) -> Optional[tuple[bool, str]]:
     """Pour le diagnostic : (terminee, texte) si le dernier message vient de Claude."""
     global LAST_REASON
@@ -209,17 +283,21 @@ def _read_last_claude_message(win) -> Optional[tuple[bool, str]]:
 # Surveillance
 # ----------------------------------------------------------------------------
 class ClaudeDesktopReader(QObject):
-    """Appelle `callback(texte)` (dans le thread de l'interface) quand une reponse vient de se terminer."""
+    """Dans le thread de l'interface : `callback(texte)` quand une reponse vient de se terminer,
+    `on_loaded(texte)` quand une conversation est ouverte ou changee (derniere reponse, sans lecture)."""
 
     _ready = Signal(str)
+    _loaded = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.callback = None
+        self.on_loaded = None
         self._enabled = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._ready.connect(self._deliver)  # methode de cet objet : livraison dans le thread de l'interface
+        self._loaded.connect(self._deliver_loaded)
 
     @property
     def available(self) -> bool:
@@ -231,6 +309,13 @@ class ClaudeDesktopReader(QObject):
                 self.callback(text)
             except Exception:
                 log.exception("Lecture de la reponse Claude Desktop")
+
+    def _deliver_loaded(self, text: str) -> None:
+        if self.on_loaded is not None:
+            try:
+                self.on_loaded(text)
+            except Exception:
+                log.exception("Chargement de la reponse Claude Desktop")
 
     def set_enabled(self, enabled: bool) -> None:
         if enabled == self._enabled:
@@ -251,9 +336,7 @@ class ClaudeDesktopReader(QObject):
 
     def _run(self) -> None:
         log.info("Claude Desktop : surveillance demarree")
-        pending = False        # derniere reponse vue "en cours" : a lire quand elle sera terminee
-        prev_total = None      # nombre de messages au passage precedent
-        last_key = None        # derniere reponse lue
+        tracker = ResponseTracker()
         last_state = None
         window_seen = False
         with auto.UIAutomationInitializerInThread():
@@ -263,38 +346,30 @@ class ClaudeDesktopReader(QObject):
                     if win is None:
                         if window_seen:
                             log.info("Claude Desktop : fenetre introuvable")
-                        window_seen, pending, prev_total = False, False, None
+                        window_seen = False
+                        tracker.reset()
                         continue
                     if not window_seen:
                         log.info("Claude Desktop : fenetre trouvee")
                         window_seen = True
                     info = _scan(win)
                     if info is None:
-                        pending, prev_total = False, None
+                        tracker.reset()
                         continue
+                    title = _conversation_title(win)
+                    if title != tracker.conv:
+                        log.info("Claude Desktop : conversation '%s'", title)
                     state = (info["name"], info["claude"], info["complete"])
                     if state != last_state:
                         log.info("Claude Desktop : %s | Claude=%s | terminee=%s", *state)
                         last_state = state
-                    if info["name"].startswith(STREAMING_PREFIX):
-                        pending = True  # reponse en cours de generation : a lire quand elle sera terminee
-                        continue
-                    total = info["total"]
-                    advanced = (prev_total is not None and total is not None
-                                and 0 < total - prev_total <= 3)
-                    if info["claude"]:
-                        key = (total, info["text"][:80])
-                        if not info["complete"]:
-                            pending = True
-                        elif (pending or advanced) and key != last_key and info["text"].strip():
-                            pending = False
-                            last_key = key
-                            log.info("Claude Desktop : reponse terminee (%d car.)", len(info["text"]))
-                            self._ready.emit(info["text"])
-                    else:
-                        pending = False
-                    if total is not None:
-                        prev_total = total
+                    action, text = tracker.feed(info, title)
+                    if action == "read":
+                        log.info("Claude Desktop : reponse terminee (%d car.)", len(text))
+                        self._ready.emit(text)
+                    elif action == "load":
+                        log.info("Claude Desktop : derniere reponse chargee (%d car.)", len(text))
+                        self._loaded.emit(text)
                 except Exception:
                     log.exception("Surveillance de Claude Desktop")
 

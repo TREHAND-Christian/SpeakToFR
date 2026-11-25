@@ -3,7 +3,7 @@ import logging
 import threading
 from typing import Callable
 
-from PySide6.QtCore import Q_ARG, QMetaObject, Qt, QTimer
+from PySide6.QtCore import Q_ARG, QCoreApplication, QMetaObject, Qt, QTimer
 
 from ..core.state import STATE
 from ..core.tts_engine import get_speed_multiplier
@@ -52,8 +52,8 @@ def _speak_sentences(win, eng, voice) -> None:
         pb.current_thread = None
 
 
-def start_playback_thread(win, eng, voice, playback_id: int, cleanup_ui: Callable[..., None]) -> None:
-    """Lance la lecture dans un thread ; en fin de lecture, referme l'UI si rien ne l'a remplacee."""
+def start_playback_thread(win, eng, voice, playback_id: int, on_finished: Callable[[], None]) -> None:
+    """Lance la lecture dans un thread ; en fin de lecture, appelle on_finished si rien ne l'a remplacee."""
     pb = STATE.playback
 
     def watcher():
@@ -67,8 +67,13 @@ def start_playback_thread(win, eng, voice, playback_id: int, cleanup_ui: Callabl
                 return  # une autre lecture a pris le relais
             if pb.pause_requested or pb.paused:
                 return
-            cleanup_ui(clear_clipboard=True)
+            pb.busy = False
+            on_finished()
 
-        QTimer.singleShot(0, cleanup)
+        # Retour dans le thread Qt. Sans objet contexte, un timer cree depuis un thread Python
+        # ne se declenche jamais : la fin de lecture n'etait pas traitee.
+        app = QCoreApplication.instance()
+        if app is not None:
+            QTimer.singleShot(0, app, cleanup)
 
     QTimer.singleShot(50, lambda: threading.Thread(target=watcher, daemon=True).start())

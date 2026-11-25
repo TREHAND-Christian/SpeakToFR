@@ -38,7 +38,13 @@ from ..text.tts_prep import (
     trim_space_before_punct,
 )
 from .alerts import NO_SELECTION_TEXT, notify_no_voice, show_no_selection_alert, speak_short_message
-from .ctrl_window_factory import apply_voice_speed_prefs_once, cleanup_ui, create_ctrl_window
+from .ctrl_window_factory import (
+    apply_voice_speed_prefs_once,
+    cleanup_ui,
+    create_ctrl_window,
+    finish_playback_ui,
+    present_ctrl_window,
+)
 
 log = logging.getLogger(__name__)
 
@@ -70,9 +76,7 @@ def _show_placeholder(app: QApplication, text_len: int, reuse_ui: bool) -> None:
         win = create_ctrl_window(text_len, None)
         win.set_info("Traduction en cours...")
         win.set_content("Traduction en cours...")
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        present_ctrl_window(win)
     except Exception:
         log.exception("Affichage de la fenetre d'attente impossible")
 
@@ -127,6 +131,7 @@ def _start_playback(
     sentences_disp = [normalized_unmasked[st:en] for st, en in positions]
     if not sentences_disp:
         log.debug("start_playback: aucune phrase detectee, abandon")
+        pb.busy = False
         return
 
     pb.sentence_parts_tts = tts_parts_for_positions(dt.masked, positions, dt.pre_ranges)
@@ -144,6 +149,7 @@ def _start_playback(
     voice = STATE.current_voice()
     eng = STATE.current_engine()
     if not voice or eng is None:
+        pb.busy = False
         return notify_no_voice(app)
     log.debug("start_playback: voix=%s, playback_id=%d", STATE.current_voice_desc, playback_id)
 
@@ -157,9 +163,8 @@ def _start_playback(
     win.set_content(normalized_unmasked, html=html_for_display, original_html=display_html)
     pb.last_display_html = html_for_display
     win.highlight_allowed = bool(allow_highlight)
-    win.show()
-    win.raise_()
-    win.activateWindow()
+    # Fenetre texte visible seulement si l'option est cochee (barre flottante sinon)
+    present_ctrl_window(win)
 
     try:
         _align_with_qt_document(win, normalized_unmasked, dt.pre_ranges, start_index)
@@ -170,7 +175,19 @@ def _start_playback(
 
     # Une fermeture de l'ancienne fenetre a pu remettre stop_requested
     pb.clear_flags()
-    start_playback_thread(win, eng, voice, playback_id, cleanup_ui)
+    pb.busy = True
+    start_playback_thread(win, eng, voice, playback_id, finish_playback_ui)
+
+
+def show_idle_text_window(text: str, html: Optional[str] = None, info: str = "") -> None:
+    """Fenetre texte sans lecture : montre la derniere reponse (le prochain Play la lira)."""
+    win = STATE.ui.ctrl_window
+    if win is None:
+        win = create_ctrl_window(len(text), _highlight_sentence)
+    win.clear_highlight()
+    win.set_info(info)
+    win.set_content(text, html=html, original_html=html)
+    present_ctrl_window(win)
 
 
 def _translate(
@@ -238,6 +255,10 @@ def speak_with_ui(
         except Exception:
             log.exception("stop_playback initial impossible")
 
+    pb = STATE.playback
+    pb.playback_token += 1  # la fin de la lecture precedente ne doit pas remettre la barre a l'arret
+    pb.busy = True  # la barre passe tout de suite en "pause" (traduction comprise)
+
     text = strip_html_comments(text)
     # Detecte si on dispose d'HTML et derive une version texte pour le TTS
     html_fragment = None
@@ -265,19 +286,26 @@ def speak_with_ui(
     def translate_and_dispatch():
         allow_highlight = True
         display_html = display_html_override
-        if translate_text:
-            log.debug("translate_and_dispatch: debut traduction")
-            translated, display_html, allow_highlight = _translate(
-                base_text, html_fragment, display_html_override, source_url, use_fast_translation
-            )
-        else:
-            translated = base_text
-            if display_html_override is None:
-                display_html = style_pre_blocks(html_fragment) if html_fragment else plain_to_html(translated)
+        try:
+            if translate_text:
+                log.debug("translate_and_dispatch: debut traduction")
+                translated, display_html, allow_highlight = _translate(
+                    base_text, html_fragment, display_html_override, source_url, use_fast_translation
+                )
+            else:
+                translated = base_text
+                if display_html_override is None:
+                    display_html = style_pre_blocks(html_fragment) if html_fragment else plain_to_html(translated)
+        except Exception:
+            log.exception("Preparation du texte impossible")
+            pb.busy = False
+            return
 
         # Post sur le thread Qt (receiver = app pour garantir la queue Qt)
         QTimer.singleShot(
-            0, app, lambda: _start_playback(app, translated, display_html, allow_highlight, True, start_index)
+            0,
+            app,
+            lambda: _start_playback(app, translated, display_html, allow_highlight, True, start_index),
         )
 
     threading.Thread(target=translate_and_dispatch, daemon=True).start()

@@ -5,7 +5,8 @@ from ..core.prefs import load_prefs
 from ..core.state import STATE
 from ..core.tts_engine import set_voice_by_index
 from ..services.clipboard import set_clipboard_text
-from .window import ControlWindow
+from .app_actions import ACTIONS
+from .window import MODE_COMPLET, ControlWindow
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ def create_ctrl_window(text_len: int, highlight_callback) -> ControlWindow:
         STATE.ui.ctrl_window = None
 
     win = ControlWindow(text_len, highlight_callback, cleanup_callback=cleanup_ui)
+    # Les modes reglage/discret sont remplaces par la barre flottante
+    win.mode_container.setVisible(False)
     win.voice_combo.blockSignals(True)
     win.speed_slider.blockSignals(True)
     win.set_voice_items([v["desc"] for v in STATE.voices], STATE.current_voice_desc)
@@ -67,6 +70,35 @@ def create_ctrl_window(text_len: int, highlight_callback) -> ControlWindow:
     STATE.ui.ctrl_window = win
     STATE.ui.voice_selector = win.voice_combo
     return win
+
+
+def present_ctrl_window(win: ControlWindow) -> None:
+    """Affiche la fenetre texte si l'option est cochee ; sinon elle reste cachee (la lecture continue)."""
+    if ACTIONS.show_text_window():
+        if getattr(win, "_mode", MODE_COMPLET) != MODE_COMPLET:
+            win.set_display_mode(MODE_COMPLET)
+        win.show()
+        win.raise_()
+    else:
+        win.hide()
+
+
+def finish_playback_ui() -> None:
+    """Fin de lecture : garde la fenetre texte si elle est affichee (Play relira), sinon la ferme.
+
+    Le presse-papiers n'est plus vide ici : il pouvait effacer ce que l'utilisateur avait copie.
+    """
+    win = STATE.ui.ctrl_window
+    if win is not None and ACTIONS.show_text_window():
+        try:
+            if win.isVisible():
+                win.clear_highlight()
+                win.set_info("Lecture terminée (Play pour relire)")
+                win.sync_pause_button()
+                return
+        except RuntimeError:  # fenetre Qt deja detruite
+            pass
+    cleanup_ui(clear_clipboard=False)
 
 
 def apply_voice_speed_prefs_once() -> None:

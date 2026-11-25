@@ -22,11 +22,15 @@ from PySide6.QtCore import Qt, QUrl, QSharedMemory
 from PySide6.QtGui import QIcon, QPainter, QColor, QPixmap, QDesktopServices
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+from codex_tts.core import volume
 from codex_tts.core.logging_setup import setup_logging
 from codex_tts.core.state import STATE
 from codex_tts.services.watcher import clipboard_loop
 from codex_tts.services.claude_desktop import ClaudeDesktopReader
 from codex_tts.core.prefs import load_prefs, save_prefs
+from codex_tts.ui.app_actions import ACTIONS, pref_bool
+from codex_tts.ui.bus import BUS
+from codex_tts.ui.minibar import MiniBar
 from codex_tts.ui.ui_main import speak_with_ui
 from codex_tts.services.hotkeys import hotkey_loop, stop_hotkey_loop
 from codex_tts.playback.control import stop_playback
@@ -52,6 +56,10 @@ def main():
     tray_icon = None
     hotkey_thread = None
     hotkey_enabled = True
+    minibar = None
+
+    # Volume / muet memorises (s'appliquent a toute la session audio de SpeakToFR)
+    volume.init_from_prefs()
 
     def shutdown():
         try:
@@ -64,6 +72,11 @@ def main():
             pass
         try:
             stop_hotkey_loop()
+        except Exception:
+            pass
+        try:
+            if minibar is not None:
+                minibar.hide()
         except Exception:
             pass
         try:
@@ -85,8 +98,20 @@ def main():
     clipboard_loop(app)
 
     claude_reader = ClaudeDesktopReader(app)
-    claude_reader.callback = lambda text: speak_with_ui(app, text=text, reuse_ui=True, translate_text=True)
     setattr(app, "_claude_desktop_reader", claude_reader)
+    auto_read = {"on": bool((load_prefs() or {}).get("claude_auto_read", True))}
+
+    def _on_claude_response(text: str) -> None:
+        """Nouvelle reponse terminee : lue tout de suite si la lecture auto est active, sinon gardee pour Play."""
+        if auto_read["on"]:
+            ACTIONS.set_loaded_text(text, fresh=False)
+            speak_with_ui(app, text=text, reuse_ui=True, translate_text=True)
+        else:
+            ACTIONS.set_loaded_text(text)
+
+    claude_reader.callback = _on_claude_response
+    # Conversation ouverte ou changee : sa derniere reponse est chargee, le prochain Play la lit
+    claude_reader.on_loaded = ACTIONS.set_loaded_text
 
     def _make_status_icon(color: str) -> QIcon:
         size = 16
@@ -105,6 +130,8 @@ def main():
         painter.drawText(0, 8, size, 7, Qt.AlignHCenter | Qt.AlignVCenter, "FR")
         painter.end()
         return QIcon(pix)
+
+    app.setWindowIcon(_make_status_icon("#2ecc71"))
 
     def _autostart_command() -> str:
         exe = Path(sys.executable)
@@ -151,7 +178,25 @@ def main():
         hotkey_enabled = enabled
         if tray_icon is not None:
             tray_icon.setIcon(_make_status_icon("#2ecc71" if hotkey_enabled else "#e74c3c"))
-            tray_icon.setToolTip("SpeakToFR")
+            tray_icon.setToolTip("SpeakToFR" if hotkey_enabled else "SpeakToFR (en pause)")
+
+    # Service en pause = plus de raccourci Ctrl+Alt+Entree ni de lecture auto Claude Desktop
+    def _apply_service_paused(paused: bool) -> None:
+        _set_hotkey_enabled(not paused)
+        claude_reader.set_enabled(not paused)
+
+    def _set_auto_read(enabled: bool) -> None:
+        auto_read["on"] = bool(enabled)
+        save_prefs({"claude_auto_read": auto_read["on"]})
+
+    ACTIONS.configure(
+        on_service_paused=_apply_service_paused,
+        get_auto_read=lambda: auto_read["on"],
+        set_auto_read=_set_auto_read,
+        get_autostart=_get_autostart_enabled,
+        set_autostart=_set_autostart_enabled,
+        claude_available=claude_reader.available,
+    )
 
     def _open_help():
         try:
@@ -171,31 +216,29 @@ def main():
         tray_icon.setToolTip("SpeakToFR")
 
         menu = QMenu()
-        toggle_action = menu.addAction("Marche/Arret Ctrl+Alt+Entree")
-        toggle_action.setCheckable(True)
-        toggle_action.setChecked(True)
-        toggle_action.triggered.connect(lambda checked: _set_hotkey_enabled(checked))
-
-        menu.addSeparator()
-        autostart_action = menu.addAction("Demarrage automatique Windows")
-        autostart_action.setCheckable(True)
-        autostart_action.setChecked(_get_autostart_enabled())
-        autostart_action.triggered.connect(lambda checked: _set_autostart_enabled(checked))
+        service_action = menu.addAction("Service actif (Ctrl+Alt+Entrée)")
+        service_action.setCheckable(True)
+        service_action.setChecked(True)
+        service_action.triggered.connect(lambda checked: ACTIONS.set_service_paused(not checked))
 
         claude_action = menu.addAction("Lecture auto Claude Desktop")
         claude_action.setCheckable(True)
-        claude_enabled = bool((load_prefs() or {}).get("claude_auto_read", True))
-        claude_action.setChecked(claude_enabled)
+        claude_action.setChecked(auto_read["on"])
         claude_action.setEnabled(claude_reader.available)
+        claude_action.triggered.connect(lambda checked: ACTIONS.set_auto_read(checked))
 
-        def _toggle_claude(checked: bool) -> None:
-            claude_reader.set_enabled(checked)
-            save_prefs({"claude_auto_read": checked})
+        bar_action = menu.addAction("Barre flottante")
+        bar_action.setCheckable(True)
+        bar_action.triggered.connect(lambda checked: ACTIONS.set_bar_visible(checked))
 
-        claude_action.triggered.connect(_toggle_claude)
-        claude_reader.set_enabled(claude_enabled)
+        autostart_action = menu.addAction("Démarrage automatique Windows")
+        autostart_action.setCheckable(True)
+        autostart_action.setChecked(_get_autostart_enabled())
+        autostart_action.triggered.connect(lambda checked: ACTIONS.set_autostart(checked))
 
         menu.addSeparator()
+        options_action = menu.addAction("Options...")
+        options_action.triggered.connect(ACTIONS.open_options)
         help_action = menu.addAction("Aide")
         help_action.triggered.connect(_open_help)
 
@@ -203,11 +246,41 @@ def main():
         quit_action = menu.addAction("Quitter")
         quit_action.triggered.connect(shutdown)
 
+        def _sync_menu(*_):
+            # Les memes reglages sont modifiables depuis la barre et les options
+            for action, value in (
+                (service_action, not ACTIONS.service_paused),
+                (claude_action, auto_read["on"]),
+                (bar_action, ACTIONS.bar_visible()),
+                (autostart_action, _get_autostart_enabled()),
+            ):
+                action.blockSignals(True)
+                action.setChecked(value)
+                action.blockSignals(False)
+
+        menu.aboutToShow.connect(_sync_menu)
+        BUS.settings_changed.connect(_sync_menu)
+
+        def _on_tray_activated(reason):
+            if reason in (QSystemTrayIcon.DoubleClick, QSystemTrayIcon.Trigger):
+                ACTIONS.open_options()
+
+        tray_icon.activated.connect(_on_tray_activated)
         tray_icon.setContextMenu(menu)
         tray_icon.show()
+        setattr(app, "_tray_menu", menu)
 
         hotkey_thread = threading.Thread(target=hotkey_loop, daemon=True)
         hotkey_thread.start()
+        # Toujours actif (sauf service en pause) : charge la derniere reponse meme sans lecture auto
+        claude_reader.set_enabled(True)
+
+    # Barre flottante (comme CodexAudio)
+    minibar = MiniBar(ACTIONS)
+    ACTIONS.minibar = minibar
+    setattr(app, "_minibar", minibar)
+    if pref_bool("bar_start", True):
+        minibar.ensure_on_top()
 
     _init_tray()
 

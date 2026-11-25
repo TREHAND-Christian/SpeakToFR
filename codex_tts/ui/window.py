@@ -24,6 +24,7 @@ from ..core.state import STATE
 from ..core.tts_engine import set_voice_by_index, tts_pause, tts_resume
 from ..playback.control import restart_current_sentence, stop_playback
 from ..text.positions import subtract_ranges
+from .bus import BUS
 from .css_colors import contrast_background
 from .widgets import make_drag_handle, make_mini_icon, make_options_icon
 
@@ -253,17 +254,29 @@ class ControlWindow(QWidget):
     def on_pause_clicked(self):
         try:
             if not STATE.playback.paused:
-                self.btn_pause.setText("Reprendre")
-                self.btn_pause.setIcon(self.play_icon)
                 tts_pause()
             else:
-                self.btn_pause.setText("Pause")
-                self.btn_pause.setIcon(self.pause_icon)
                 tts_resume()
-            if self._mode == MODE_MINI:
-                self.btn_pause.setText("")
         except Exception:
             log.exception("Pause/reprise impossible")
+        self.sync_pause_button()
+        BUS.settings_changed.emit()
+
+    def sync_pause_button(self):
+        """Met le bouton Pause/Reprendre en accord avec l'etat de lecture (pilote aussi par la barre)."""
+        paused = STATE.playback.paused
+        self.btn_pause.setIcon(self.play_icon if paused else self.pause_icon)
+        if self._mode == MODE_MINI:
+            self.btn_pause.setText("")
+        else:
+            self.btn_pause.setText("Reprendre" if paused else "Pause")
+
+    def sync_speed(self, val: float):
+        """Recale le curseur de vitesse quand elle change depuis les options."""
+        self.speed_slider.blockSignals(True)
+        self.speed_slider.setValue(int(round(val * 10)))
+        self.speed_slider.blockSignals(False)
+        self.speed_label.setText(f"Vitesse {val:.2f}".rstrip("0").rstrip("."))
 
     def on_stop_clicked(self):
         threading.Thread(target=stop_playback, daemon=True).start()
@@ -280,6 +293,7 @@ class ControlWindow(QWidget):
                     set_voice_by_index(i)
                     restart_current_sentence(stop_existing=True, adjust_layout=False)
                     save_prefs({"voice": text})
+                    BUS.settings_changed.emit()
                     break
         except Exception:
             pass
@@ -290,6 +304,7 @@ class ControlWindow(QWidget):
         self.speed_label.setText(f"Vitesse {val:.1f}")
         restart_current_sentence(debounce_ms=200, stop_existing=True, adjust_layout=False)
         save_prefs({"speed": val})
+        BUS.settings_changed.emit()
 
     def schedule_adjust(self):
         QTimer.singleShot(0, self._adjust_height_to_text)
@@ -444,6 +459,10 @@ class ControlWindow(QWidget):
                 pass
 
         self.schedule_adjust()
+
+    def set_display_mode(self, mode: str) -> None:
+        """Change le mode d'affichage sans le memoriser dans les preferences."""
+        self._set_mode(mode, persist=False)
 
     def _jump_to_sentence(self, idx: int):
         if not STATE.playback.sentence_parts:
