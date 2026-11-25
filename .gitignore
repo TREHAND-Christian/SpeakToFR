@@ -70,3 +70,10 @@ desktop.ini
 /.git
 /.venv
 /.vscode
+
+# ========================
+# Compilation du projet : versionnee malgre les regles ci-dessus
+# ========================
+!build_release.ps1
+!SetupSpeakToFR.iss
+!SpeakToFR.spec
