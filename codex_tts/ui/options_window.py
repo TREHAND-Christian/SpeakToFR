@@ -181,7 +181,11 @@ class OptionsWindow(QWidget):
         if not self._actions.claude_available:
             self.chk_auto.setEnabled(False)
             self.chk_auto.setToolTip("Lecture de Claude Desktop indisponible sur ce PC")
-        for w in (self.chk_pause, self.chk_mute, self.chk_auto):
+        self.chk_partial = QCheckBox("Lire aussi les réponses intermédiaires")
+        self.chk_partial.setToolTip("Pendant que Claude travaille, chaque texte terminé est lu sans attendre la fin")
+        if not self._actions.claude_available:
+            self.chk_partial.setEnabled(False)
+        for w in (self.chk_pause, self.chk_mute, self.chk_auto, self.chk_partial):
             main.add(w)
 
         grid = QGridLayout()
@@ -222,8 +226,10 @@ class OptionsWindow(QWidget):
         self.chk_bar_start = QCheckBox("Afficher la barre flottante au démarrage")
         self.chk_bar_dim = QCheckBox("Griser la barre quand Claude Desktop n'a pas le focus")
         self.chk_bar_dim.setToolTip("Normale seulement quand Claude Desktop est au premier plan, grisée ailleurs")
+        self.chk_selection = QCheckBox("Ailleurs, activer la barre si du texte est sélectionné")
+        self.chk_selection.setToolTip("Hors de Claude Desktop : Play lit la sélection, comme Ctrl+Alt+Entrée")
         self.chk_autostart = QCheckBox("Lancer SpeakToFR au démarrage de Windows")
-        for w in (self.chk_bar, self.chk_bar_start, self.chk_bar_dim, self.chk_autostart):
+        for w in (self.chk_bar, self.chk_bar_start, self.chk_bar_dim, self.chk_selection, self.chk_autostart):
             ui.add(w)
         root.addWidget(ui)
 
@@ -288,6 +294,7 @@ class OptionsWindow(QWidget):
         self.chk_pause.toggled.connect(a.set_service_paused)
         self.chk_mute.toggled.connect(a.set_muted)
         self.chk_auto.toggled.connect(a.set_auto_read)
+        self.chk_partial.toggled.connect(a.set_read_partial)
         self.voice_combo.currentIndexChanged.connect(self._on_voice)
         self.speed_slider.valueChanged.connect(self._on_speed)
         self.volume_slider.valueChanged.connect(self._on_volume)
@@ -295,6 +302,7 @@ class OptionsWindow(QWidget):
         self.chk_bar.toggled.connect(a.set_bar_visible)
         self.chk_bar_start.toggled.connect(lambda v: save_prefs({"bar_start": bool(v)}))
         self.chk_bar_dim.toggled.connect(a.set_dim_unfocused)
+        self.chk_selection.toggled.connect(a.set_selection_mode)
         self.chk_autostart.toggled.connect(a.set_autostart)
         self.chk_show_text.toggled.connect(a.set_show_text)
         self.chk_no_retranslate.toggled.connect(lambda v: save_prefs({"auto_detect_french": bool(v)}))
@@ -322,8 +330,9 @@ class OptionsWindow(QWidget):
         a = self._actions
         prefs = load_prefs() or {}
         widgets = (
-            self.chk_pause, self.chk_mute, self.chk_auto, self.voice_combo, self.speed_slider,
-            self.volume_slider, self.chk_bar, self.chk_bar_start, self.chk_bar_dim, self.chk_autostart,
+            self.chk_pause, self.chk_mute, self.chk_auto, self.chk_partial, self.voice_combo, self.speed_slider,
+            self.volume_slider, self.chk_bar, self.chk_bar_start, self.chk_bar_dim, self.chk_selection,
+            self.chk_autostart,
             self.chk_show_text, self.chk_no_retranslate, self.chk_force, self.chk_debug,
         )
         for w in widgets:
@@ -332,6 +341,7 @@ class OptionsWindow(QWidget):
             self.chk_pause.setChecked(bool(a.service_paused))
             self.chk_mute.setChecked(volume.is_muted())
             self.chk_auto.setChecked(a.auto_read())
+            self.chk_partial.setChecked(a.read_partial())
 
             descs = [v.get("desc", "?") for v in STATE.voices]
             current = [self.voice_combo.itemData(i) for i in range(self.voice_combo.count())]
@@ -362,6 +372,8 @@ class OptionsWindow(QWidget):
             self.chk_bar.setEnabled(a.minibar is not None)
             self.chk_bar_start.setChecked(bool(prefs.get("bar_start", True)))
             self.chk_bar_dim.setChecked(a.dim_unfocused())
+            self.chk_selection.setChecked(a.selection_mode())
+            self.chk_selection.setEnabled(a.selection is not None and a.selection.available)
             self.chk_autostart.setChecked(a.autostart())
             self.chk_show_text.setChecked(a.show_text_window())
             self.chk_no_retranslate.setChecked(bool(prefs.get("auto_detect_french", True)))

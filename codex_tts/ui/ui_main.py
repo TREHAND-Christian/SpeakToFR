@@ -239,6 +239,7 @@ def speak_with_ui(
     translate_text: bool = True,
     display_html_override: Optional[str] = None,
     source_url: Optional[str] = None,
+    origin: Optional[str] = None,  # "claude" ou "selection" ; None = relance de la meme lecture
 ):
     if not text or text.strip() == "":
         return
@@ -258,6 +259,8 @@ def speak_with_ui(
     pb = STATE.playback
     pb.playback_token += 1  # la fin de la lecture precedente ne doit pas remettre la barre a l'arret
     pb.busy = True  # la barre passe tout de suite en "pause" (traduction comprise)
+    if origin:
+        pb.last_origin = origin
 
     text = strip_html_comments(text)
     # Detecte si on dispose d'HTML et derive une version texte pour le TTS

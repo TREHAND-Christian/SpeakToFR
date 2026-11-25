@@ -87,7 +87,12 @@ def finish_playback_ui() -> None:
     """Fin de lecture : garde la fenetre texte si elle est affichee (Play relira), sinon la ferme.
 
     Le presse-papiers n'est plus vide ici : il pouvait effacer ce que l'utilisateur avait copie.
+    S'il reste des morceaux a lire (reponses intermediaires), le suivant demarre aussitot.
     """
+    if STATE.playback.stop_requested:
+        ACTIONS.clear_queue()  # arret demande : on ne lit pas la suite
+    elif ACTIONS.play_next_queued():
+        return
     win = STATE.ui.ctrl_window
     if win is not None and ACTIONS.show_text_window():
         try:

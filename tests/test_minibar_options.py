@@ -151,6 +151,7 @@ def test_play_reads_loaded_response_then_rereads(app, actions, monkeypatch):
 
     monkeypatch.setattr(app_actions, "restart_current_sentence", lambda **kw: restarts.append(kw))
     monkeypatch.setattr(STATE.playback, "last_text", "Derniere reponse traduite.")
+    monkeypatch.setattr(STATE.playback, "last_origin", "claude")  # lue par la lecture auto/Play
     actions.play_pause()
     assert calls == ["Derniere reponse de Claude."] and len(restarts) == 1
     assert actions.is_playing() is True  # la barre passe tout de suite en "pause"

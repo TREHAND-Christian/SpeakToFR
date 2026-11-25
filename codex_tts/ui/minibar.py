@@ -7,6 +7,7 @@ autre appli (VS Code compris : c'est alors la barre CodexAudio qui sert). Elle r
 couleurs au survol de la souris et reste toujours cliquable.
 La barre se deplace en glissant n'importe ou (boutons compris) ; sa position est memorisee.
 """
+import ctypes
 import logging
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
@@ -40,6 +41,7 @@ class MiniBar(QWidget):
         self._playing = False
         self._text_on = False
         self._active = False  # quelque chose a arreter (lecture, traduction, pause)
+        self._selection = False  # texte selectionne hors Claude Desktop : Play le lit
         self._dimmed = False  # gris : Claude Desktop n'a pas le focus
         self._hover = False
         self._focus = FocusTracker()
@@ -54,8 +56,10 @@ class MiniBar(QWidget):
         self.setWindowFlag(Qt.Tool, True)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        # Ne vole pas le focus a Claude Desktop quand la barre apparait
+        # Ne prend jamais le focus : l'appli au premier plan le garde, meme quand on clique la barre
+        # (indispensable pour que Play copie la selection de cette appli)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
         self.setFixedHeight(36)
 
         self.btn_play = QPushButton()
@@ -103,6 +107,28 @@ class MiniBar(QWidget):
         BUS.service_changed.connect(lambda *_: self.refresh_state())
 
     # ---------------------------------------------------------------- affichage
+    def _set_no_activate(self) -> None:
+        """WS_EX_NOACTIVATE : un clic sur la barre ne retire pas le focus a l'appli en cours."""
+        try:
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            get_style = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+            set_style = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+            get_style.restype = ctypes.c_ssize_t
+            get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            set_style.restype = ctypes.c_ssize_t
+            set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+            GWL_EXSTYLE, WS_EX_NOACTIVATE = -20, 0x08000000
+            style = get_style(hwnd, GWL_EXSTYLE)
+            if not style & WS_EX_NOACTIVATE:
+                set_style(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+        except Exception:
+            log.exception("Style WS_EX_NOACTIVATE impossible")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._set_no_activate()
+
     def ensure_on_top(self) -> None:
         try:
             self.show()
@@ -112,17 +138,22 @@ class MiniBar(QWidget):
 
     def refresh_state(self) -> None:
         focused = self._focus.update()
+        selection = self._actions.selection_active()
         state = (
             bool(self._actions.service_paused),
             volume.is_muted(),
             self._actions.is_playing(),
             self._actions.show_text_window(),
-            self._actions.dim_unfocused() and not focused and not self._hover,
+            self._actions.dim_unfocused() and not (focused or selection) and not self._hover,
             self._actions.is_active(),
+            selection,
         )
-        if state == (self._app_paused, self._muted, self._playing, self._text_on, self._dimmed, self._active):
+        current = (self._app_paused, self._muted, self._playing, self._text_on, self._dimmed, self._active,
+                   self._selection)
+        if state == current:
             return
-        self._app_paused, self._muted, self._playing, self._text_on, self._dimmed, self._active = state
+        (self._app_paused, self._muted, self._playing, self._text_on, self._dimmed, self._active,
+         self._selection) = state
         self._refresh_buttons()
         self.update()
 
@@ -136,7 +167,12 @@ class MiniBar(QWidget):
         self.btn_opts.setIcon(self._icons["gear"])
         self.btn_play.setIcon(self._icons["pause" if self._playing else "play"])
         self.btn_mute.setIcon(self._icons["muted" if self._muted else "volume"])
-        self.btn_play.setToolTip("Mettre en pause la lecture" if self._playing else "Lire / reprendre la lecture")
+        if self._playing:
+            self.btn_play.setToolTip("Mettre en pause la lecture")
+        elif self._selection and not self._actions.is_paused():
+            self.btn_play.setToolTip("Lire le texte sélectionné")
+        else:
+            self.btn_play.setToolTip("Lire / reprendre la lecture")
         self.btn_mute.setToolTip("Réactiver le son" if self._muted else "Couper le son (muet)")
         self.btn_text.setToolTip("Masquer la fenêtre texte" if self._text_on else "Afficher la fenêtre texte")
         self.btn_text.setProperty("active", "true" if self._text_on else "false")

@@ -1,9 +1,13 @@
-"""Traduction des noeuds texte d'un fragment HTML en preservant le balisage."""
+"""Traduction des noeuds texte d'un fragment HTML en preservant le balisage.
+
+Les noeuds a traduire sont d'abord releves, puis envoyes ensemble (translate_many) :
+quelques requetes au lieu d'une par noeud (un lien, un mot en gras, un element de liste...).
+"""
 import html
 import re
 from html.parser import HTMLParser
 
-from ..services.translator import translate_to_fr
+from ..services.translator import translate_many, translate_to_fr
 from .html_text import plain_to_html, strip_html_comments, strip_html_to_text
 
 
@@ -13,10 +17,11 @@ class _HTMLTranslator(HTMLParser):
     SKIP_TAGS = {"script", "style", "head", "meta", "title", "link", "pre"}
     SPELL_TAGS = {"code"}
 
-    def __init__(self, translate_fn):
+    def __init__(self, translate_fn=None):
         super().__init__(convert_charrefs=True)
-        self.translate_fn = translate_fn
+        self.translate_fn = translate_fn  # garde pour compatibilite (plus utilise : traduction groupee)
         self.tokens = []
+        self.pending = []  # (index du token, texte) : noeuds a traduire en fin d'analyse
         self._skip = 0
         self._stack = []
 
@@ -48,26 +53,22 @@ class _HTMLTranslator(HTMLParser):
             self.tokens.append(("data", data, data, False))
             return
         inside_code = any(t in self.SPELL_TAGS for t in self._stack)
-        inside_heading = any(t in {"h1","h2","h3","h4","h5","h6"} for t in self._stack)
-        display_text = data
-        plain_text = data
-        if data.strip():
-            try:
-                if inside_heading:
-                    # Traduire tout le contenu des titres (y compris les <a> internes)
-                    display_text = self.translate_fn(data)
-                    plain_text = display_text
-                elif inside_code:
-                    # Ne pas traduire l'intérieur des <code>
-                    display_text = data
-                    plain_text = data
-                else:
-                    display_text = self.translate_fn(data)
-                    plain_text = display_text
-            except Exception:
-                display_text = data
-                plain_text = data
-        self.tokens.append(("data", display_text, plain_text, True))
+        # Les titres (y compris leurs <a>) et le texte courant sont traduits ; l'interieur des <code> non.
+        # Les noeuds sans lettres (puces, chiffres, ponctuation) ne partent pas a la traduction.
+        if data.strip() and not inside_code and any(ch.isalpha() for ch in data):
+            self.pending.append((len(self.tokens), data))
+        self.tokens.append(("data", data, data, True))
+
+    def translate_pending(self) -> None:
+        """Traduit d'un coup tous les noeuds releves et remet chaque traduction a sa place."""
+        if not self.pending:
+            return
+        try:
+            translated = translate_many([text for _, text in self.pending])
+        except Exception:
+            return  # texte d'origine conserve
+        for (idx, _), text_fr in zip(self.pending, translated):
+            self.tokens[idx] = ("data", text_fr, text_fr, True)
 
     def handle_comment(self, data):
         self.tokens.append(("comment", data))
@@ -104,10 +105,11 @@ def translate_html_preserve_markup(html_fragment: str):
         translated = translate_to_fr(html_fragment)
         return translated, plain_to_html(translated)
 
-    translator = _HTMLTranslator(translate_to_fr)
+    translator = _HTMLTranslator()
     try:
         translator.feed(html_fragment)
         translator.close()
+        translator.translate_pending()
     except Exception:
         # Si parsing echoue, fallback brut
         translated = translate_to_fr(strip_html_to_text(html_fragment))

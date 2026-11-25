@@ -6,7 +6,10 @@ Principe :
   (la barre d'actions du message, avec "Lire a voix haute", apparait), son texte
   est extrait et envoye a SpeakToFR (`callback`) ;
 - quand une conversation est ouverte ou changee (titre du document "Titre - Claude"),
-  sa derniere reponse est seulement chargee (`on_loaded`) : le prochain Play la lira.
+  sa derniere reponse est seulement chargee (`on_loaded`) : le prochain Play la lira ;
+- pendant la generation, chaque paragraphe termine (texte intermediaire entre deux outils,
+  ou paragraphe deja suivi d'un autre) est envoye tout de suite (`on_partial`) ; a la fin,
+  seule la partie pas encore envoyee est a lire. Les lignes d'etat ("Utilisant ...") sont ignorees.
 
 Test sans lecture (Claude Desktop ouvert) :
     python -m codex_tts.services.claude_desktop
@@ -38,6 +41,37 @@ STREAMING_PREFIX = "Message en cours"  # nom du groupe pendant la generation de 
 ACTIONS_TOOLBAR = "Actions du message"
 
 POLL_SECONDS = 1.0
+# Lignes d'etat des outils (trop repetitives pour etre lues) ; les autres lignes d'etape resument le travail
+_TOOL_LINE_PREFIXES = ("utilisant ", "utilisé ", "using ", "used ", "running ", "ran ")
+# Etat ajoute en texte cache (lecteurs d'ecran) au nom d'une etape qui tourne
+_RUNNING_SUFFIX = re.compile(r"[\s,.:;-]*(en cours d['’]ex[ée]cution|en cours|in progress|running)\s*$", re.IGNORECASE)
+
+
+def clean_status(name: str) -> str:
+    """Libelle d'une ligne d'etape sans son etat ("... en cours d'execution")."""
+    return _RUNNING_SUFFIX.sub("", (name or "").strip()).strip()
+
+
+def _visible_label(button) -> str:
+    """Texte visible d'un bouton de ligne d'etape (sans les textes caches 'sr-only')."""
+    parts: list[str] = []
+    try:
+        for group in button.GetChildren():
+            try:
+                if "sr-only" in (group.ClassName or ""):
+                    continue
+            except Exception:
+                pass
+            if group.ControlTypeName == "TextControl":
+                if (group.Name or "").strip():
+                    parts.append(group.Name.strip())
+                continue
+            for c in group.GetChildren():
+                if c.ControlTypeName == "TextControl" and (c.Name or "").strip():
+                    parts.append(c.Name.strip())
+    except Exception:
+        return ""
+    return " ".join(parts)
 _LIST_MARKER = re.compile(r"^(\d+\.|•|-)$")
 _NO_SPACE_BEFORE = (" ", "\xa0", ",", ".", ";", ":", ")", "!", "?", "»", "’", "'")
 _NO_SPACE_AFTER = (" ", "\xa0", "(", "«", "’", "'")
@@ -115,6 +149,8 @@ def _walk(ctrl, paragraphs: list[str], button_names: set[str], state: dict) -> N
     for child in ctrl.GetChildren():
         kind = child.ControlTypeName
         name = (child.Name or "").strip()
+        if kind == "StatusBarControl":
+            continue  # annonce pour lecteur d'ecran (doublon de la ligne d'etat d'un outil)
         if kind == "ToolBarControl":
             flush()
             if name == ACTIONS_TOOLBAR:
@@ -126,6 +162,15 @@ def _walk(ctrl, paragraphs: list[str], button_names: set[str], state: dict) -> N
             flush()
             if name:
                 button_names.add(name)
+                try:
+                    if "group/status-line" in (ctrl.ClassName or ""):
+                        # Ligne d'etape (resume du travail) : libelle visible, sans "en cours d'execution"
+                        label = clean_status(_visible_label(child) or name)
+                        if label:
+                            state.setdefault("status", []).append(label)
+                except Exception:
+                    pass
+            paragraphs.append(None)  # repere : ce qui precede est termine (outil, ligne d'etat...)
             continue
         if kind == "TextControl":
             if name.startswith(CLAUDE_PREFIX):
@@ -177,11 +222,14 @@ def _scan(win) -> Optional[dict]:
         LAST_REASON = "aucun groupe 'Message N sur M' dans la liste"
         return None
     last = msgs[-1]
-    paragraphs: list[str] = []
+    items: list = []  # paragraphes, et reperes None (bouton, ligne d'etat d'un outil)
     buttons: set[str] = set()
     state: dict = {}
-    _walk(last, paragraphs, buttons, state)
-    paragraphs = [p for p in paragraphs if p not in buttons]
+    _walk(last, items, buttons, state)
+    items = [p for p in items if p is None or p not in buttons]
+    # Un paragraphe suivi d'autre chose est termine ; le tout dernier peut encore s'ecrire
+    trailing_open = bool(items) and items[-1] is not None
+    paragraphs = [p for p in items if p is not None]
     # Un titre sans ponctuation finale serait colle a la phrase suivante par la synthese vocale.
     paragraphs = [p if p[-1] in ".!?:;…»)" else p + "." for p in paragraphs]
     m = _MSG_NUM.search(last.Name or "")
@@ -192,7 +240,15 @@ def _scan(win) -> Optional[dict]:
         "claude": bool(state.get("claude")),
         "complete": bool(state.get("complete")),
         "text": "\n\n".join(paragraphs),
+        "paragraphs": paragraphs,
+        "done_count": len(paragraphs) - (1 if trailing_open else 0),
+        "status": list(dict.fromkeys(state.get("status", []))),
     }
+
+
+def is_tool_line(name: str) -> bool:
+    """Ligne d'etat d'un outil ("Utilisant Windows-MCP...") : pas lue."""
+    return (name or "").strip().lower().startswith(_TOOL_LINE_PREFIXES)
 
 
 def _conversation_title(win, max_depth: int = 12) -> str:
@@ -229,29 +285,87 @@ class ResponseTracker:
         self.prev_total = None    # nombre de messages au passage precedent
         self.last_key = None      # derniere reponse lue ou chargee
         self.conv = None          # titre de la conversation affichee
+        self.spoken: list[str] = []  # paragraphes deja envoyes pendant la generation
+        self.spoken_status: set[str] = set()  # lignes d'etape deja envoyees
+        # Passage precedent : un texte n'est envoye que s'il n'a pas bouge depuis (le texte
+        # s'affiche progressivement et les lignes d'etape sont animees d'un libelle a l'autre)
+        self.prev_paras: list[str] = []
+        self.prev_status: set[str] = set()
+        self.remaining = ""       # partie pas encore envoyee de la derniere reponse terminee
 
     def reset(self) -> None:
         """Fenetre ou liste des messages introuvable."""
         self.pending, self.prev_total = False, None
+        self._new_response()
+
+    def _new_response(self) -> None:
+        self.spoken = []
+        self.spoken_status = set()
+        self.prev_paras = []
+        self.prev_status = set()
+
+    def _remaining(self, final: list[str]) -> str:
+        """Paragraphes de la reponse finale qui n'ont pas deja ete envoyes pendant la generation."""
+        spoken = self.spoken
+        k = 0
+        while k < len(spoken) and k < len(final) and final[k] == spoken[k]:
+            k += 1
+        if spoken and k < len(spoken):
+            # Les textes intermediaires ne sont plus dans la reponse finale (replies) : on repart
+            # apres le dernier paragraphe deja lu s'il y est, sinon on lit toute la reponse finale.
+            try:
+                k = len(final) - final[::-1].index(spoken[-1])
+            except ValueError:
+                k = 0
+        return "\n\n".join(final[k:])
 
     def feed(self, info: dict, title: str) -> tuple[Optional[str], str]:
-        """Renvoie ("read", texte), ("load", texte) ou (None, "")."""
+        """Renvoie ("partial", morceau), ("read", texte complet), ("load", texte) ou (None, "").
+
+        Apres ("read", ...), `remaining` contient la partie pas encore envoyee en "partial".
+        """
         total = info.get("total")
         if title != self.conv:
             # Autre conversation : pas de detection par le nombre de messages, et une reponse
             # "en cours" n'est gardee que pour un nouveau chat (son titre change apres la 1re reponse).
             if not (total is not None and total <= 2):
                 self.pending = False
+                self._new_response()
             self.prev_total = None
             self.conv = title
         if info["name"].startswith(STREAMING_PREFIX):
+            if not self.pending:
+                self._new_response()  # nouvelle reponse
             self.pending = True
+            chunk = []
+            status = info.get("status") or []
+            for line in status:
+                # Ligne d'etape stable (deja vue au passage precedent) et pas encore lue
+                if line in self.prev_status and line not in self.spoken_status:
+                    self.spoken_status.add(line)
+                    if not is_tool_line(line):
+                        chunk.append(line if line[-1] in ".!?…" else line + ".")
+            paras = info.get("paragraphs") or []
+            done = min(info.get("done_count", 0), len(paras))
+            # Paragraphes termines ET identiques au passage precedent (fini de s'afficher)
+            stable = 0
+            while stable < done and stable < len(self.prev_paras) and paras[stable] == self.prev_paras[stable]:
+                stable += 1
+            if stable > len(self.spoken):
+                new = paras[len(self.spoken):stable]
+                self.spoken.extend(new)
+                chunk.extend(new)
+            self.prev_paras = list(paras)
+            self.prev_status = set(status)
+            if chunk:
+                return "partial", "\n\n".join(chunk)
             return None, ""
         advanced = self.prev_total is not None and total is not None and 0 < total - self.prev_total <= 3
         if total is not None:
             self.prev_total = total
         if not info["claude"]:
-            self.pending = False
+            # Message de l'utilisateur, ou reponse de Claude dont l'en-tete "Claude a repondu" n'est
+            # pas encore affiche (etat transitoire en fin de generation) : on garde la reponse attendue.
             return None, ""
         if not info["complete"]:
             self.pending = True
@@ -263,7 +377,10 @@ class ResponseTracker:
         self.last_key = key
         if self.pending or advanced:
             self.pending = False
+            self.remaining = self._remaining(info.get("paragraphs") or text.split("\n\n"))
+            self._new_response()
             return "read", text
+        self._new_response()
         return "load", text
 
 
@@ -286,29 +403,39 @@ class ClaudeDesktopReader(QObject):
     """Dans le thread de l'interface : `callback(texte)` quand une reponse vient de se terminer,
     `on_loaded(texte)` quand une conversation est ouverte ou changee (derniere reponse, sans lecture)."""
 
-    _ready = Signal(str)
+    _ready = Signal(str, str)  # (reponse complete, partie pas encore envoyee en "partial")
     _loaded = Signal(str)
+    _partial = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.callback = None
-        self.on_loaded = None
+        self.callback = None     # callback(texte_complet, reste_a_lire)
+        self.on_loaded = None    # on_loaded(texte)
+        self.on_partial = None   # on_partial(morceau) : reponse intermediaire terminee
         self._enabled = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._ready.connect(self._deliver)  # methode de cet objet : livraison dans le thread de l'interface
         self._loaded.connect(self._deliver_loaded)
+        self._partial.connect(self._deliver_partial)
 
     @property
     def available(self) -> bool:
         return auto is not None
 
-    def _deliver(self, text: str) -> None:
+    def _deliver(self, text: str, remaining: str) -> None:
         if self.callback is not None:
             try:
-                self.callback(text)
+                self.callback(text, remaining)
             except Exception:
                 log.exception("Lecture de la reponse Claude Desktop")
+
+    def _deliver_partial(self, text: str) -> None:
+        if self.on_partial is not None:
+            try:
+                self.on_partial(text)
+            except Exception:
+                log.exception("Lecture d'une reponse intermediaire de Claude Desktop")
 
     def _deliver_loaded(self, text: str) -> None:
         if self.on_loaded is not None:
@@ -364,9 +491,13 @@ class ClaudeDesktopReader(QObject):
                         log.info("Claude Desktop : %s | Claude=%s | terminee=%s", *state)
                         last_state = state
                     action, text = tracker.feed(info, title)
-                    if action == "read":
-                        log.info("Claude Desktop : reponse terminee (%d car.)", len(text))
-                        self._ready.emit(text)
+                    if action == "partial":
+                        log.info("Claude Desktop : reponse intermediaire (%d car.)", len(text))
+                        self._partial.emit(text)
+                    elif action == "read":
+                        log.info("Claude Desktop : reponse terminee (%d car., %d pas encore lus)",
+                                 len(text), len(tracker.remaining))
+                        self._ready.emit(text, tracker.remaining)
                     elif action == "load":
                         log.info("Claude Desktop : derniere reponse chargee (%d car.)", len(text))
                         self._loaded.emit(text)

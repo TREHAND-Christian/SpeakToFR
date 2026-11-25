@@ -27,6 +27,7 @@ from codex_tts.core.logging_setup import setup_logging
 from codex_tts.core.state import STATE
 from codex_tts.services.watcher import clipboard_loop
 from codex_tts.services.claude_desktop import ClaudeDesktopReader
+from codex_tts.services.selection import SelectionWatcher
 from codex_tts.core.prefs import load_prefs, save_prefs
 from codex_tts.ui.app_actions import ACTIONS, pref_bool
 from codex_tts.ui.bus import BUS
@@ -75,6 +76,10 @@ def main():
         except Exception:
             pass
         try:
+            selection.set_enabled(False)
+        except Exception:
+            pass
+        try:
             if minibar is not None:
                 minibar.hide()
         except Exception:
@@ -101,15 +106,26 @@ def main():
     setattr(app, "_claude_desktop_reader", claude_reader)
     auto_read = {"on": bool((load_prefs() or {}).get("claude_auto_read", True))}
 
-    def _on_claude_response(text: str) -> None:
-        """Nouvelle reponse terminee : lue tout de suite si la lecture auto est active, sinon gardee pour Play."""
+    def _on_claude_partial(text: str) -> None:
+        """Reponse intermediaire terminee (pendant que Claude travaille) : lue a la suite."""
+        if auto_read["on"] and ACTIONS.read_partial():
+            ACTIONS.enqueue_reading(text, origin="claude")
+
+    def _on_claude_response(text: str, remaining: str = None) -> None:
+        """Reponse terminee : lue (la partie pas encore lue) si la lecture auto est active, sinon gardee pour Play."""
+        if remaining is None:
+            remaining = text
         if auto_read["on"]:
-            ACTIONS.set_loaded_text(text, fresh=False)
-            speak_with_ui(app, text=text, reuse_ui=True, translate_text=True)
+            partial = ACTIONS.read_partial()
+            ACTIONS.enqueue_reading(remaining if partial else text, origin="claude")
+            # Lue en plusieurs morceaux : le prochain Play relira la reponse entiere
+            chunked = partial and remaining.strip() != text.strip()
+            ACTIONS.set_loaded_text(text, fresh=chunked)
         else:
             ACTIONS.set_loaded_text(text)
 
     claude_reader.callback = _on_claude_response
+    claude_reader.on_partial = _on_claude_partial
     # Conversation ouverte ou changee : sa derniere reponse est chargee, le prochain Play la lit
     claude_reader.on_loaded = ACTIONS.set_loaded_text
 
@@ -197,6 +213,11 @@ def main():
         set_autostart=_set_autostart_enabled,
         claude_available=claude_reader.available,
     )
+
+    # Texte selectionne hors Claude Desktop : la barre redevient active et Play le lit
+    selection = SelectionWatcher()
+    ACTIONS.selection = selection
+    ACTIONS.update_selection_watcher()
 
     def _open_help():
         try:

@@ -33,6 +33,10 @@ class AppActions:
         self.claude_available = False
         self._show_text: Optional[bool] = None
         self._dim_unfocused: Optional[bool] = None
+        self._selection_mode: Optional[bool] = None
+        self.selection = None  # SelectionWatcher (texte selectionne hors Claude Desktop)
+        self._read_partial: Optional[bool] = None
+        self._queue: list = []  # morceaux a lire a la suite (reponses intermediaires)
         # Derniere reponse de la conversation affichee dans Claude Desktop
         self._loaded_text = ""
         self._loaded_fresh = False  # pas encore lue : le prochain Play la lit
@@ -77,6 +81,53 @@ class AppActions:
     def has_last_text(self) -> bool:
         return bool((STATE.playback.last_text or "").strip())
 
+    # ---------------------------------------------------------------- mode selection
+    def selection_mode(self) -> bool:
+        """Hors de Claude Desktop, du texte selectionne active la barre et Play le lit."""
+        if self._selection_mode is None:
+            self._selection_mode = pref_bool("bar_selection_mode", True)
+        return self._selection_mode
+
+    def set_selection_mode(self, enabled: bool) -> None:
+        self._selection_mode = bool(enabled)
+        save_prefs({"bar_selection_mode": bool(enabled)})
+        self.update_selection_watcher()
+        BUS.settings_changed.emit()
+
+    def update_selection_watcher(self) -> None:
+        if self.selection is not None:
+            self.selection.set_enabled(self.selection_mode() and not self.service_paused)
+
+    def selection_active(self) -> bool:
+        """Du texte est selectionne dans l'appli au premier plan, et ce n'est pas Claude Desktop."""
+        sel = self.selection
+        if sel is None or not sel.enabled or not sel.has_selection:
+            return False
+        # Verification immediate : des le retour dans Claude Desktop, la selection ne compte plus
+        # (sans attendre le prochain passage de la surveillance)
+        from ..services.foreground import CLAUDE_DESKTOP_EXES, exe_name, foreground_pid
+
+        try:
+            if exe_name(foreground_pid()) in CLAUDE_DESKTOP_EXES:
+                sel.has_selection = False
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _last_read_is_claude(self) -> bool:
+        pb = STATE.playback
+        return self.has_last_text() and pb.last_origin == "claude"
+
+    def read_selection(self) -> None:
+        """Lit la selection de l'appli au premier plan, comme Ctrl+Alt+Entree."""
+        from ..services.hotkeys import copy_selection_and_tag  # import local (win32)
+
+        self.clear_queue()
+        threading.Thread(
+            target=copy_selection_and_tag, kwargs={"release_modifiers": False}, daemon=True
+        ).start()
+
     # ---------------------------------------------------------------- reponse chargee
     def loaded_text(self) -> str:
         return self._loaded_text
@@ -102,6 +153,39 @@ class AppActions:
             self.open_idle_text_window()
         BUS.settings_changed.emit()
 
+    # ---------------------------------------------------------------- file d'attente
+    def read_partial(self) -> bool:
+        """Lire aussi les reponses intermediaires de Claude Desktop, au fil de l'eau."""
+        if self._read_partial is None:
+            self._read_partial = pref_bool("claude_read_partial", True)
+        return self._read_partial
+
+    def set_read_partial(self, enabled: bool) -> None:
+        self._read_partial = bool(enabled)
+        save_prefs({"claude_read_partial": bool(enabled)})
+        BUS.settings_changed.emit()
+
+    def enqueue_reading(self, text: str, origin: str = "claude") -> None:
+        """Lit le texte tout de suite, ou a la suite de la lecture en cours (sans la couper)."""
+        text = (text or "").strip()
+        if not text:
+            return
+        self._queue.append((text, origin))
+        if not self.is_active():
+            self.play_next_queued()
+
+    def play_next_queued(self) -> bool:
+        if not self._queue or STATE.ui.root is None:
+            return False
+        from .ui_main import speak_with_ui  # import local (evite les cycles)
+
+        text, origin = self._queue.pop(0)
+        speak_with_ui(STATE.ui.root, text=text, reuse_ui=True, translate_text=True, origin=origin)
+        return True
+
+    def clear_queue(self) -> None:
+        self._queue.clear()
+
     # ---------------------------------------------------------------- lecture
     def play_pause(self) -> None:
         pb = STATE.playback
@@ -110,6 +194,8 @@ class AppActions:
                 tts_resume()
             elif self.is_playing():
                 tts_pause()
+            elif self.selection_active():
+                self.read_selection()
             else:
                 self.play_last()
         except Exception:
@@ -118,14 +204,20 @@ class AppActions:
         BUS.settings_changed.emit()
 
     def play_last(self) -> None:
-        """Rien en cours : lit la reponse chargee (pas encore lue), sinon relit la derniere lecture."""
+        """Rien en cours : reponse de Claude Desktop (chargee, ou derniere lue), jamais une ancienne selection.
+
+        - reponse chargee pas encore lue -> on la lit ;
+        - derniere lecture = une reponse de Claude -> on la relit sans retraduire ;
+        - derniere lecture = une selection -> on revient a la reponse chargee de Claude.
+        """
         pb = STATE.playback
         root = STATE.ui.root
-        if self._loaded_text and root is not None and (self._loaded_fresh or not self.has_last_text()):
+        self.clear_queue()
+        if self._loaded_text and root is not None and (self._loaded_fresh or not self._last_read_is_claude()):
             from .ui_main import speak_with_ui  # import local (evite les cycles)
 
             self._loaded_fresh = False
-            speak_with_ui(root, text=self._loaded_text, reuse_ui=True, translate_text=True)
+            speak_with_ui(root, text=self._loaded_text, reuse_ui=True, translate_text=True, origin="claude")
         elif self.has_last_text():
             pb.sentence_index = 0
             pb.clear_flags()
@@ -133,6 +225,7 @@ class AppActions:
             restart_current_sentence(stop_existing=True, adjust_layout=False)
 
     def stop(self) -> None:
+        self.clear_queue()
         win = STATE.ui.ctrl_window
         try:
             if win is not None:
@@ -222,7 +315,7 @@ class AppActions:
 
     def _idle_content(self) -> tuple:
         pb = STATE.playback
-        if self._loaded_text and (self._loaded_fresh or not self.has_last_text()):
+        if self._loaded_text and (self._loaded_fresh or not self._last_read_is_claude()):
             return self._loaded_text, None, INFO_LOADED
         if self.has_last_text():
             return pb.last_text, pb.last_display_html, INFO_LAST_READ
@@ -279,6 +372,7 @@ class AppActions:
                 self._on_service_paused(paused)
             except Exception:
                 log.exception("Changement d'etat du service impossible")
+        self.update_selection_watcher()
         BUS.service_changed.emit(paused)
         BUS.settings_changed.emit()
 

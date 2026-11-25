@@ -155,6 +155,7 @@ def test_style_pre_blocks_styles_inline_code():
 # ---------- traduction preservant le HTML ----------
 def test_translate_preserve_markup_uses_translator(monkeypatch):
     monkeypatch.setattr(html_translate, "translate_to_fr", lambda t: t.upper())
+    monkeypatch.setattr(html_translate, "translate_many", lambda ts: [t.upper() for t in ts])
     plain, html_out = html_translate.translate_html_preserve_markup("<p>hello <code>keep</code></p><pre>no</pre>")
     assert "HELLO" in html_out
     assert "<code>keep</code>" in html_out
@@ -170,12 +171,14 @@ def test_translate_preserve_markup_plain_text(monkeypatch):
 
 def test_translate_preserve_markup_headings_end_sentence(monkeypatch):
     monkeypatch.setattr(html_translate, "translate_to_fr", lambda t: t)
+    monkeypatch.setattr(html_translate, "translate_many", lambda ts: list(ts))
     plain, _ = html_translate.translate_html_preserve_markup("<h1>Titre</h1><p>Texte</p>")
     assert plain.startswith("Titre. ")
 
 
 def test_translate_preserve_markup_removes_images_and_comments(monkeypatch):
     monkeypatch.setattr(html_translate, "translate_to_fr", lambda t: t)
+    monkeypatch.setattr(html_translate, "translate_many", lambda ts: list(ts))
     _, out = html_translate.translate_html_preserve_markup("<p>a<img src='x'><!-- c -->b</p>")
     assert "<img" not in out and "<!--" not in out
 

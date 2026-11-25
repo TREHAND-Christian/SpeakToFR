@@ -36,6 +36,8 @@ class PlaybackState:
 
     # Lecture demandee et pas terminee (traduction, lecture ou pause) : pilote la barre flottante
     busy: bool = False
+    # Origine de la derniere lecture : "claude" (reponse de Claude Desktop) ou "selection"
+    last_origin: str = ""
 
     current_thread: Optional[threading.Thread] = None
     # Identifiant de lecture courant (evite le clignotement lors des relances)

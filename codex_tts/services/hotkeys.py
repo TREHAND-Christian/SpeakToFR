@@ -70,6 +70,53 @@ def real_ctrl_c():
         pass
 
 
+def copy_selection_and_tag(release_modifiers: bool = True) -> None:
+    """Copie la selection de l'appli au premier plan et la met, balisee, dans le presse-papiers.
+
+    Le watcher du presse-papiers la lit ensuite. Appelee par Ctrl+Alt+Entree, et par le bouton Play
+    de la barre (release_modifiers=False : aucune touche n'est enfoncee).
+    """
+    log.debug("Hotkey detecte, copie du texte")
+
+    before = get_clipboard_text()
+
+    # IMPORTANT : éviter Ctrl+Alt+C
+    if release_modifiers:
+        release_hotkey_modifiers()
+        time.sleep(0.03)
+
+    real_ctrl_c()
+
+    
+    # Attendre un vrai changement du presse-papiers
+    new = ""
+    payload = {"type": "text", "text": "", "html": None, "url": None}
+    for _ in range(30):  # ~1.5s max
+        time.sleep(0.05)
+        payload = get_clipboard_payload()
+        cur = payload.get("html") or payload.get("text") or ""
+        if cur != before:
+            new = cur
+            break
+
+    if new.strip():
+        if payload.get("type") == "html" and payload.get("html"):
+            tagged = f"{TAG}\n" + json.dumps(
+                {"type": "html", "html": payload.get("html"), "url": payload.get("url")},
+                ensure_ascii=False,
+            )
+        else:
+            tagged = f"{TAG}\n{new}"
+    else:
+        tagged = f"{TAG}\nveuillez selectionner un texte"
+
+    ok = set_clipboard_text(tagged)
+    if ok:
+        log.debug("Texte balise dans le presse-papiers")
+    else:
+        log.warning("Impossible d'ecrire dans le presse-papiers (verrouille ?)")
+
+
 def hotkey_loop():
     global HOTKEY_THREAD_ID
     ok = RegisterHotKey(None, HOTKEY_ID, MOD_CTRL_ALT, VK_ENTER)
@@ -104,44 +151,7 @@ def hotkey_loop():
             break
 
         if msg.message == win32con.WM_HOTKEY and msg.wParam == HOTKEY_ID:
-            log.debug("Hotkey detecte, copie du texte")
-
-            before = get_clipboard_text()
-
-            # IMPORTANT : éviter Ctrl+Alt+C
-            release_hotkey_modifiers()
-            time.sleep(0.03)
-
-            real_ctrl_c()
-
-            
-            # Attendre un vrai changement du presse-papiers
-            new = ""
-            payload = {"type": "text", "text": "", "html": None, "url": None}
-            for _ in range(30):  # ~1.5s max
-                time.sleep(0.05)
-                payload = get_clipboard_payload()
-                cur = payload.get("html") or payload.get("text") or ""
-                if cur != before:
-                    new = cur
-                    break
-
-            if new.strip():
-                if payload.get("type") == "html" and payload.get("html"):
-                    tagged = f"{TAG}\n" + json.dumps(
-                        {"type": "html", "html": payload.get("html"), "url": payload.get("url")},
-                        ensure_ascii=False,
-                    )
-                else:
-                    tagged = f"{TAG}\n{new}"
-            else:
-                tagged = f"{TAG}\nveuillez selectionner un texte"
-
-            ok = set_clipboard_text(tagged)
-            if ok:
-                log.debug("Texte balise dans le presse-papiers")
-            else:
-                log.warning("Impossible d'ecrire dans le presse-papiers (verrouille ?)")
+            copy_selection_and_tag()
 
         user32.TranslateMessage(ctypes.byref(msg))
         user32.DispatchMessageW(ctypes.byref(msg))

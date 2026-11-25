@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from codex_tts.core.config import TAG
 from codex_tts.services.clipboard import get_clipboard_text, set_clipboard_text
+from codex_tts.ui.app_actions import ACTIONS
 from codex_tts.ui.ui_main import speak_with_ui
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ def clipboard_loop(app: QApplication) -> None:
                 log.exception("Nettoyage du presse-papiers impossible")
 
             log.debug("watcher: lecture demandee")
+            ACTIONS.clear_queue()
             QTimer.singleShot(
                 0,
                 lambda: speak_with_ui(
@@ -61,6 +63,7 @@ def clipboard_loop(app: QApplication) -> None:
                     translate_text=True,
                     display_html_override=None,
                     source_url=source_url,
+                    origin="selection",
                 ),
             )
         except KeyboardInterrupt:
